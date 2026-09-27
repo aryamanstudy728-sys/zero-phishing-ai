@@ -1,0 +1,23 @@
+{
+  "name": "zero-phishing-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zero Phishing AI - Browser extension for phishing detection",
+  "scripts": {
+    "dev": "pnpm --filter @zero-phishing/backend dev",
+    "build": "pnpm --filter @zero-phishing/extension build && pnpm --filter @zero-phishing/backend build",
+    "lint": "pnpm --filter @zero-phishing/extension lint && pnpm --filter @zero-phishing/backend lint",
+    "typecheck": "pnpm --filter @zero-phishing/extension typecheck && pnpm --filter @zero-phishing/backend typecheck",
+    "test": "pnpm --filter @zero-phishing/extension test && pnpm --filter @zero-phishing/backend test",
+    "format": "prettier --write \"**/*.{ts,tsx,json,md,py,yaml,yml}\"",
+    "db:up": "docker-compose -f infrastructure/docker-compose.yml up -d",
+    "db:down": "docker-compose -f infrastructure/docker-compose.yml down"
+  },
+  "devDependencies": {
+    "prettier": "^3.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "pnpm@9.7.0"
+}

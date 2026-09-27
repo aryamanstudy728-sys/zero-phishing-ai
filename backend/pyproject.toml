@@ -1,0 +1,96 @@
+[project]
+name = "zero-phishing-backend"
+version = "0.1.0"
+description = "Zero Phishing AI Backend API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "sqlalchemy[asyncio]>=2.0.25",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "python-jose[cryptography]>=3.3.0",
+    "passlib[bcrypt]>=1.7.4",
+    "python-multipart>=0.0.6",
+    "httpx>=0.26.0",
+    "google-generativeai>=0.7.0",
+    "google-auth>=2.25.0",
+    "google-api-python-client>=2.108.0",
+    "msal>=1.26.0",
+    "dnspython>=2.4.2",
+    "python-whois>=0.8.0",
+    "python-levenshtein>=0.23.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.1.0",
+    "pydantic-extra-types>=2.4.0",
+    "opentelemetry-api>=1.22.0",
+    "opentelemetry-sdk>=1.22.0",
+    "opentelemetry-exporter-otlp>=1.22.0",
+    "opentelemetry-instrumentation-fastapi>=0.43b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.43b0",
+    "opentelemetry-instrumentation-httpx>=0.43b0",
+    "structlog>=24.1.0",
+    "python-json-logger>=2.0.7",
+    "redis>=5.0.0",
+    "tenacity>=8.2.0",
+    "email-validator>=2.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.12.0",
+    "httpx>=0.26.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.6.0",
+    "faker>=22.0.0",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E", "F", "I", "N", "W", "UP", "B", "C4", "SIM", "T20", "PIE", "PT", "Q", "RUF", "TRY", "ARG", "PTH", "ERA", "PD", "PL", "TCH", "INT", "PERF"
+]
+ignore = ["E501", "SIM103"]
+fixable = ["ALL"]
+unfixable = ["T20", "TRY003"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = ["tests/*", "alembic/*"]
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
