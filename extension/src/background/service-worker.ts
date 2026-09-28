@@ -161,8 +161,25 @@ async function handleGetAuthToken(
   sendResponse: (response: { success: boolean; token?: string; error?: string }) => void
 ) {
   try {
-    const token = await getAccessToken(message.provider, message.interactive ?? true);
-    sendResponse({ success: !!token, token: token ?? undefined });
+    const provider = message.provider;
+    const interactive = message.interactive ?? true;
+
+    // Get scopes from manifest for the provider
+    const scopes = provider === 'google'
+      ? ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/userinfo.email']
+      : ['https://graph.microsoft.com/Mail.Read', 'https://graph.microsoft.com/User.Read'];
+
+    chrome.identity.getAuthToken({ interactive, scopes }, (token) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ success: false, error: chrome.runtime.lastError.message });
+        return;
+      }
+      if (!token) {
+        sendResponse({ success: false, error: 'User denied authorization' });
+        return;
+      }
+      sendResponse({ success: true, token });
+    });
   } catch (error) {
     sendResponse({ success: false, error: error instanceof Error ? error.message : 'Auth failed' });
   }

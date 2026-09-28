@@ -48,10 +48,10 @@ async function connectGmail(): Promise<void> {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN', payload: { provider: 'google', interactive: true } });
     if (response && !response.success && response.error) {
-      console.warn('[ZeroPhish] Gmail connect response:', response.error);
+      showToast(response.error);
     }
   } catch (e) {
-    console.error('Gmail connect failed:', e);
+    showToast(e instanceof Error ? e.message : 'Connection failed');
   } finally {
     await loadStatus();
   }
@@ -65,10 +65,10 @@ async function connectOutlook(): Promise<void> {
   try {
     const response = await chrome.runtime.sendMessage({ type: 'GET_AUTH_TOKEN', payload: { provider: 'microsoft', interactive: true } });
     if (response && !response.success && response.error) {
-      console.warn('[ZeroPhish] Outlook connect response:', response.error);
+      showToast(response.error);
     }
   } catch (e) {
-    console.error('Outlook connect failed:', e);
+    showToast(e instanceof Error ? e.message : 'Connection failed');
   } finally {
     await loadStatus();
   }

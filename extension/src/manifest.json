@@ -26,16 +26,30 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://mail.google.com/*"],
-      "js": ["content/gmail.js"],
-      "css": ["badge.css"],
+      "matches": [
+        "https://mail.google.com/*"
+      ],
+      "js": [
+        "content/gmail.js"
+      ],
+      "css": [
+        "badge.css"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     },
     {
-      "matches": ["https://outlook.live.com/*", "https://outlook.office.com/*", "https://outlook.office365.com/*"],
-      "js": ["content/outlook.js"],
-      "css": ["badge.css"],
+      "matches": [
+        "https://outlook.live.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.office365.com/*"
+      ],
+      "js": [
+        "content/outlook.js"
+      ],
+      "css": [
+        "badge.css"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     }
@@ -55,7 +69,7 @@
     "https://api.zero-phishing.ai/*"
   ],
   "oauth2": {
-    "client_id": "76251994079-jcgpm52ejudr3uelr9q3dutc5ijljg7k.apps.googleusercontent.com",
+    "client_id": "76251994079-kuo7s4uk8u0ff5uo0218bjpo7410bsq5.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/gmail.readonly",
       "https://www.googleapis.com/auth/userinfo.email"
@@ -63,11 +77,19 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["badge.css"],
-      "matches": ["https://mail.google.com/*", "https://outlook.live.com/*", "https://outlook.office.com/*", "https://outlook.office365.com/*"]
+      "resources": [
+        "badge.css"
+      ],
+      "matches": [
+        "https://mail.google.com/*",
+        "https://outlook.live.com/*",
+        "https://outlook.office.com/*",
+        "https://outlook.office365.com/*"
+      ]
     }
   ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsnW/33TnNYkyKaVJDy9RZMzLgP85pv6K3dgcOLWi13ok2clu63fAlLTheSQznsV0SC6K3Ur5czwVaTXv1Gf5htQ5txy/YTxlNtbkNruzf5841ZRRQg+WACMOH0G21/Kn6rZ+/+3Anp5OQSjGDYdN9UhCYC/s+kFnRQng4pNZWq3a2czRhCJYjwWF0ss125nvmy/8XVffAWyMOhUWqO6yOKlctbBx/jJtMIy+y28X3hRzILybgqPi/pbMeyx032d3ksHzeOlebgGiurZU0LStNi59B7AxJBh6l5Xta6g7zBEMVYQMqOmpoHjclNRvoSWBFMABa5hOg/P8ftdNMwBoxQIDAQAB"
 }
