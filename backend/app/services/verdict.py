@@ -240,8 +240,12 @@ async def analyze_email(
     """Main analysis function - runs all checks and returns verdict."""
     start_time = datetime.now(timezone.utc)
 
-    # Check if already analyzed
-    stmt = select(Email).where(Email.message_id == message_id, Email.provider == provider)
+    # Check if already analyzed (user isolation)
+    stmt = select(Email).where(
+        Email.message_id == message_id,
+        Email.provider == provider,
+        Email.user_id == user_hash
+    )
     result = await db.execute(stmt)
     email = result.scalar_one_or_none()
 

@@ -29,7 +29,7 @@ class Email(Base):
 
     __table_args__ = (
         Index("ix_emails_user_provider_received", "user_id", "provider", "received_at"),
-        Index("ix_emails_message_provider", "message_id", "provider", unique=True),
+        Index("ix_emails_user_message_provider", "user_id", "message_id", "provider", unique=True),
     )
 
 

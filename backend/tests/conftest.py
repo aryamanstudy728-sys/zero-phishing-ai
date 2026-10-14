@@ -1,4 +1,4 @@
-// Pytest configuration
+# Pytest configuration
 
 import pytest
 import pytest_asyncio
@@ -8,8 +8,8 @@ from app.config import get_settings
 
 settings = get_settings()
 
-# Override settings for testing
-settings.database_url = "postgresql+asyncpg://postgres:postgres@localhost:5432/zerophish_test"
+# Override settings for testing - use SQLite in-memory
+settings.database_url = "sqlite+aiosqlite:///:memory:"
 settings.app_env = "test"
 settings.debug = True
 

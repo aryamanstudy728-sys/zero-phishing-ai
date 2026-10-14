@@ -14,8 +14,8 @@ async def submit_feedback(
     note: str | None
 ) -> None:
     """Submit user feedback on a verdict."""
-    # Verify email exists
-    stmt = select(Email).where(Email.id == email_id)
+    # Verify email exists and belongs to this user
+    stmt = select(Email).where(Email.id == email_id, Email.user_id == user_hash)
     result = await db.execute(stmt)
     email = result.scalar_one_or_none()
 
