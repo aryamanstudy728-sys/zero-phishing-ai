@@ -5,6 +5,7 @@ Tests the REAL verify_google_token function with mocked dependencies.
 import hashlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import redis.asyncio as redis
 from fastapi import HTTPException, status
@@ -283,6 +284,26 @@ async def test_verify_google_token_empty_client_id_server_error():
 
 
 @pytest.mark.asyncio
+async def test_verify_google_token_google_unreachable():
+    """Test that when Google cannot be reached, returns 503."""
+    with patch("httpx.AsyncClient") as mock_client_class:
+        mock_client = AsyncMock()
+        mock_client_class.return_value.__aenter__.return_value = mock_client
+        mock_client.get.side_effect = httpx.RequestError("Network error")
+        
+        with patch("app.services.auth_google.settings") as mock_settings:
+            mock_settings.google_client_id = "test-client-id"
+            mock_settings.user_hash_secret = "test-secret"
+            mock_settings.is_production = False
+            
+            with pytest.raises(HTTPException) as exc_info:
+                await verify_google_token("any-token")
+            
+            assert exc_info.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+            assert exc_info.value.detail == "Could not verify authentication token"
+
+
+@pytest.mark.asyncio
 async def test_verify_google_token_invalid_expires_in():
     """Test that invalid expires_in is treated as failed token."""
     token_info = {
@@ -296,7 +317,7 @@ async def test_verify_google_token_invalid_expires_in():
     }
     
     with patch("httpx.AsyncClient") as mock_client_class, \
-         patch("app.config.get_settings") as mock_get_settings, \
+         patch("app.services.auth_google.settings") as mock_settings, \
          patch("app.services.auth_google.get_redis_client") as mock_get_redis:
         
         mock_client = AsyncMock()
@@ -306,11 +327,9 @@ async def test_verify_google_token_invalid_expires_in():
         mock_response.json.return_value = token_info
         mock_client.get.return_value = mock_response
         
-        mock_settings = MagicMock()
         mock_settings.google_client_id = "test-client-id"
         mock_settings.user_hash_secret = "test-secret"
         mock_settings.is_production = False
-        mock_get_settings.return_value = mock_settings
         
         # Mock Redis 
         mock_redis = AsyncMock()

@@ -2,6 +2,7 @@
 import hashlib
 import hmac
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -13,25 +14,39 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 _redis_client: Optional[redis.Redis] = None
+_redis_last_failure_time: float = 0
+_REDIS_RETRY_COOLDOWN = 30  # seconds
 
 
 async def get_redis_client() -> Optional[redis.Redis]:
-    global _redis_client
-    if _redis_client is None:
-        try:
-            _redis_client = redis.from_url(
-                settings.redis_url,
-                socket_connect_timeout=0.5,
-                socket_timeout=0.5,
-                retry_on_timeout=False,
-            )
-            # Test the connection
-            await _redis_client.ping()
-        except Exception as e:
-            logger.warning(f"Failed to connect to Redis: {e}")
-            # If Redis connection fails, we'll return None and handle it in the caller
-            _redis_client = None
-    return _redis_client
+    global _redis_client, _redis_last_failure_time
+    
+    # If we have a cached client, return it
+    if _redis_client is not None:
+        return _redis_client
+        
+    # If we recently failed, don't retry yet
+    if time.time() - _redis_last_failure_time < _REDIS_RETRY_COOLDOWN:
+        return None
+        
+    try:
+        _redis_client = redis.from_url(
+            settings.redis_url,
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            retry_on_timeout=False,
+        )
+        # Test the connection
+        await _redis_client.ping()
+        # Reset failure time on successful connection
+        _redis_last_failure_time = 0
+        return _redis_client
+    except Exception as e:
+        logger.warning(f"Failed to connect to Redis: {e}")
+        # If Redis connection fails, we'll return None and handle it in the caller
+        _redis_client = None
+        _redis_last_failure_time = time.time()
+        return None
 
 
 async def verify_google_token(token: str) -> str:
@@ -39,10 +54,8 @@ async def verify_google_token(token: str) -> str:
     Verify a Google access token and return a stable user hash.
     Raises HTTPException 401 if verification fails.
     """
-    print("DEBUG: Entering verify_google_token function")
     # Check misconfiguration first, before any network call
     expected_client_id = settings.google_client_id
-    print(f"DEBUG: expected_client_id = {expected_client_id}")
     if not expected_client_id:
         # Fail closed: if no client ID configured, reject all tokens
         logger.error("Server misconfiguration: Google client ID not set")
@@ -68,28 +81,21 @@ async def verify_google_token(token: str) -> str:
 
     # Check Redis cache for successful verification first
     token_hash = hashlib.sha256(token.encode()).hexdigest()
-    print(f"DEBUG: token_hash = {token_hash}")
     redis_client = await get_redis_client()
-    print(f"DEBUG: redis_client = {redis_client}")
     if redis_client is not None:
         try:
             cached = await redis_client.get(f"google_token_success:{token_hash}")
-            print(f"DEBUG: cached from success cache = {cached}")
             if cached is not None:
                 return cached.decode("utf-8")
         except Exception:
             # Redis error, fall back to live verification
             pass
 
-    # Check Redis cache for failed verification to avoid hammering God
-    print(f"DEBUG: Checking Redis failure cache for token_hash: {token_hash}")
+    # Check Redis cache for failed verification to avoid hammering Google
     if redis_client is not None:
         try:
             failed_cached = await redis_client.get(f"google_token_failure:{token_hash}")
-            # DEBUG: Print what we got from Redis
-            print(f"DEBUG: Failed token cache check: failed_cached={failed_cached}, type={type(failed_cached)}")
             if failed_cached is not None:
-                print("DEBUG: Raising HTTPException for cached failed token")
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid authentication token",
@@ -99,7 +105,7 @@ async def verify_google_token(token: str) -> str:
             # If we can't check the cache due to Redis issues, we'll proceed with verification
             # But don't catch HTTP exceptions that we raise ourselves
             if not isinstance(e, HTTPException):
-                print(f"DEBUG: Exception in Redis failure cache check: {e}")
+                logger.debug(f"Exception in Redis failure cache check: {e}")
                 pass
             else:
                 # Re-raise HTTP exceptions
@@ -113,8 +119,9 @@ async def verify_google_token(token: str) -> str:
                 params={"access_token": token},
             )
         except httpx.RequestError as exc:
+            logger.warning(f"Could not reach Google tokeninfo endpoint: {exc}")
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Could not verify authentication token",
                 headers={"WWW-Authenticate": "Bearer"},
             ) from exc
