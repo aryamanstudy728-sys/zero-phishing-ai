@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Google Safe Browsing
     safe_browsing_api_key: str = ""
 
+    # User hashing
+    user_hash_secret: str = ""
+
     # PhishTank
     phishtank_api_key: str = ""
     phishtank_data_url: str = "https://data.phishtank.com/data/online-valid.csv"

@@ -3,8 +3,9 @@
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from app.database import Base
+from app.database import Base, get_db_session
 from app.config import get_settings
+from app.main import create_app
 
 settings = get_settings()
 
@@ -41,4 +42,31 @@ async def db_session(db_engine):
 
 @pytest.fixture(autouse=True)
 def mock_settings(monkeypatch):
+    # Override settings for testing - use SQLite in-memory
+    settings.database_url = "sqlite+aiosqlite:///:memory:"
+    settings.app_env = "test"
+    settings.debug = True
+    # Set Google client ID and user hash secret to avoid misconfiguration errors
+    settings.google_client_id = "test-client-id"
+    settings.user_hash_secret = "test-user-hash-secret"
+    print(f"Mock settings: google_client_id={settings.google_client_id}, user_hash_secret={settings.user_hash_secret}")
     monkeypatch.setattr("app.config.get_settings", lambda: settings)
+
+
+@pytest.fixture(autouse=True)
+def mock_verify_google_token(monkeypatch):
+    """Mock the Google token verification to return a fixed user hash."""
+    print("Setting up mock_verify_google_token")
+    async def mock_verify(token: str) -> str:
+        print(f"Mock verify_google_token called with token: {token}")
+        return "test-user-hash"
+    monkeypatch.setattr("app.api.deps.verify_google_token", mock_verify)
+
+
+@pytest.fixture(autouse=True)
+def override_get_db_dependency(db_session):
+    """Override the get_db_session dependency to use the test session."""
+    from app.main import app
+    app.dependency_overrides[get_db_session] = lambda: db_session
+    yield
+    app.dependency_overrides.pop(get_db_session, None)

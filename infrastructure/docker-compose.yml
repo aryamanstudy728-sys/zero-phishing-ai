@@ -36,19 +36,20 @@ services:
       context: ../backend
       dockerfile: Dockerfile
     container_name: zerophish-backend
-    environment:
-      - APP_ENV=development
-      - DEBUG=true
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/zerophish
-      - REDIS_URL=redis://redis:6379/0
-      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
-      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
-      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
-      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
-      - SAFE_BROWSING_API_KEY=${SAFE_BROWSING_API_KEY}
-      - PHISHTANK_API_KEY=${PHISHTANK_API_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
-      - JWT_SECRET_KEY=dev-secret-change-in-production
+     environment:
+       - APP_ENV=development
+       - DEBUG=true
+       - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/zerophish
+       - REDIS_URL=redis://redis:6379/0
+       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
+       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
+       - SAFE_BROWSING_API_KEY=${SAFE_BROWSING_API_KEY}
+       - PHISHTANK_API_KEY=${PHISHTANK_API_KEY}
+       - GEMINI_API_KEY=${GEMINI_API_KEY}
+       - JWT_SECRET_KEY=dev-secret-change-in-production
+       - USER_HASH_SECRET=dev-user-hash-secret-change-in-production
     ports:
       - "8080:8080"
     depends_on:

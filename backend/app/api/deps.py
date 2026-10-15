@@ -3,10 +3,7 @@
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import get_settings
-
-# NOTE: jose is available (python-jose[cryptography] in pyproject.toml) and
-# should be used here when real JWT verification is added. Removed for now
-# because it was imported but never called.
+from app.services.auth_google import verify_google_token
 
 settings = get_settings()
 security = HTTPBearer(auto_error=False)
@@ -18,10 +15,7 @@ async def get_current_user_hash(
 ) -> str:
     """
     Extract and verify user identity from OAuth token.
-    For MVP, we accept the OAuth access token directly and hash it for user identification.
-
-    TODO: In production, verify the token against Google/Microsoft before hashing.
-          Use jose.jwt.decode() with the provider's public keys.
+    Verifies the token with Google and returns a stable user hash.
     """
     if not credentials:
         raise HTTPException(
@@ -30,8 +24,9 @@ async def get_current_user_hash(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    import hashlib
-    return hashlib.sha256(credentials.credentials.encode()).hexdigest()[:64]
+    # TODO: Support Microsoft/Outlook tokens. For now, only Google tokens are supported.
+    # Non-Google tokens will fail verification with Google and return 401.
+    return await verify_google_token(credentials.credentials)
 
 
 async def get_optional_user_hash(
@@ -43,7 +38,6 @@ async def get_optional_user_hash(
         return None
 
     try:
-        import hashlib
-        return hashlib.sha256(credentials.credentials.encode()).hexdigest()[:64]
-    except Exception:
+        return await verify_google_token(credentials.credentials)
+    except HTTPException:
         return None
