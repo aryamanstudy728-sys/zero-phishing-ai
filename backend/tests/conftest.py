@@ -49,16 +49,13 @@ def mock_settings(monkeypatch):
     # Set Google client ID and user hash secret to avoid misconfiguration errors
     settings.google_client_id = "test-client-id"
     settings.user_hash_secret = "test-user-hash-secret"
-    print(f"Mock settings: google_client_id={settings.google_client_id}, user_hash_secret={settings.user_hash_secret}")
     monkeypatch.setattr("app.config.get_settings", lambda: settings)
 
 
 @pytest.fixture(autouse=True)
 def mock_verify_google_token(monkeypatch):
     """Mock the Google token verification to return a fixed user hash."""
-    print("Setting up mock_verify_google_token")
     async def mock_verify(token: str) -> str:
-        print(f"Mock verify_google_token called with token: {token}")
         return "test-user-hash"
     monkeypatch.setattr("app.api.deps.verify_google_token", mock_verify)
 
