@@ -2,6 +2,11 @@
 // Handles OAuth, message routing, API calls, and caching
 
 import { getAccessToken, revokeToken, onTokenChanged, clearAllTokens } from './oauth.js';
+import { extractEmailData as extractGmailEmail } from '../content/gmail/extractor.js';
+import { extractEmailData as extractOutlookEmail } from '../content/outlook/extractor.js';
+import { toAnalysisBody } from '../utils/analysis.js';
+import { recordVerdict } from '../utils/stats.js';
+import { API_BASE_URL } from '../config.js';
 
 export interface AnalysisRequest {
   messageId: string;
@@ -10,6 +15,12 @@ export interface AnalysisRequest {
   bodyText: string;
   bodyHtml: string | null;
   urls: string[];
+}
+
+// What content scripts send; the service worker reads the email itself
+export interface AnalyzeEmailMessage {
+  messageId: string;
+  provider: 'gmail' | 'outlook';
 }
 
 export interface VerdictResponse {
@@ -32,9 +43,6 @@ interface CacheEntry {
 const CACHE_DB_NAME = 'zp-verdict-cache';
 const CACHE_STORE_NAME = 'verdicts';
 const CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
-const API_BASE_URL = 'https://api.zero-phishing.ai/api/v1'; // Will be replaced at build time
-
-let apiBaseUrl = API_BASE_URL;
 
 // Initialize IndexedDB for verdict caching
 async function initCacheDB(): Promise<IDBDatabase> {
@@ -98,7 +106,7 @@ function hashMessage(messageId: string, provider: string): string {
 }
 
 // Analyze email via backend API
-async function analyzeEmail(request: AnalysisRequest): Promise<VerdictResponse> {
+async function analyzeEmail(request: AnalyzeEmailMessage): Promise<VerdictResponse> {
   const messageHash = hashMessage(request.messageId, request.provider);
 
   // Check cache first
@@ -115,13 +123,18 @@ async function analyzeEmail(request: AnalysisRequest): Promise<VerdictResponse> 
     throw new Error(`No valid ${request.provider} OAuth token`);
   }
 
-  const response = await fetch(`${apiBaseUrl}/analyze`, {
+  // The service worker holds the OAuth token, so it reads the email itself
+  const emailData = request.provider === 'gmail'
+    ? await extractGmailEmail(request.messageId, token)
+    : await extractOutlookEmail(request.messageId, token);
+
+  const response = await fetch(`${API_BASE_URL}/analyze`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${token}`
     },
-    body: JSON.stringify(request)
+    body: JSON.stringify(toAnalysisBody(request.provider, emailData))
   });
 
   if (!response.ok) {
@@ -135,9 +148,15 @@ async function analyzeEmail(request: AnalysisRequest): Promise<VerdictResponse> 
 }
 
 // Message handlers
-async function handleAnalyzeEmail(message: AnalysisRequest, sendResponse: (response: VerdictResponse | { error: string }) => void) {
+async function handleAnalyzeEmail(message: AnalyzeEmailMessage, sendResponse: (response: VerdictResponse | { error: string }) => void) {
   try {
     const verdict = await analyzeEmail(message);
+    // Count only successful verdicts; failures never reach this point
+    try {
+      await recordVerdict(verdict.verdict);
+    } catch (statsError) {
+      console.error('[ZeroPhish] Failed to update stats:', statsError);
+    }
     sendResponse(verdict);
   } catch (error) {
     console.error('[ZeroPhish] Analysis error:', error);

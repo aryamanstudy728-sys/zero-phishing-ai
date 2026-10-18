@@ -1,6 +1,6 @@
 // Gmail email content extraction
 
-interface RawEmailData {
+export interface RawEmailData {
   messageId: string;
   headersRaw: string;
   bodyText: string;
@@ -74,6 +74,16 @@ function parseRawEmail(raw: string): { headers: string; bodyText: string; bodyHt
 function extractUrls(html: string | null): string[] {
   if (!html) return [];
   const urls: string[] = [];
+
+  if (typeof DOMParser === 'undefined') {
+    // No DOM in the MV3 service worker: fall back to scanning hrefs directly
+    const hrefRegex = /href=["'](https?:\/\/[^"']+)["']/gi;
+    for (const match of html.matchAll(hrefRegex)) {
+      urls.push(match[1]);
+    }
+    return [...new Set(urls)];
+  }
+
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
   const links = doc.querySelectorAll('a[href]');

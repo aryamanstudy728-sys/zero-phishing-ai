@@ -101,14 +101,6 @@ function updateStatsUI(stats: Stats): void {
   (document.getElementById('stat-flagged')!).textContent = stats.flagged.toString();
 }
 
-async function incrementStat(key: 'analyzed' | 'safe' | 'flagged'): Promise<void> {
-  const result = await chrome.storage.local.get(['zp_stats']);
-  const stats = result.zp_stats || { analyzed: 0, safe: 0, flagged: 0 };
-  stats[key]++;
-  await chrome.storage.local.set({ zp_stats: stats });
-  updateStatsUI(stats);
-}
-
 async function analyzeCurrentEmail(): Promise<void> {
   const btn = document.getElementById('analyze-current') as HTMLButtonElement;
   btn.disabled = true;
@@ -124,7 +116,6 @@ async function analyzeCurrentEmail(): Promise<void> {
         type: 'ANALYZE_EMAIL_REQUEST',
         payload: { provider }
       });
-      await incrementStat('analyzed');
     }
   } catch (e) {
     console.error('Analysis failed:', e);

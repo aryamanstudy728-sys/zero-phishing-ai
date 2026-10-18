@@ -1,8 +1,7 @@
 // API client for backend communication
 
 import type { AnalysisRequest, VerdictResponse } from '../background/service-worker.js';
-
-const API_BASE_URL = 'https://api.zero-phishing.ai/api/v1';
+import { API_BASE_URL } from '../config.js';
 
 interface ApiClientOptions {
   getToken: (provider: 'gmail' | 'outlook') => Promise<string | null>;

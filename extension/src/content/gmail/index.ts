@@ -1,6 +1,6 @@
 // Gmail content script entry point
 
-import { extractEmailData } from './extractor.js';
+// Email extraction now happens in the background service worker (it holds the OAuth token)
 import { injectVerdict, injectLoading, updateVerdict, removeInjected } from './injector.js';
 
 interface AnalysisResult {
