@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     # Application
     app_name: str = "Zero Phishing AI"
     app_env: str = "development"
-    debug: bool = True
+    debug: bool = False
     log_level: str = "INFO"
 
     # API
