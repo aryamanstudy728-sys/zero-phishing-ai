@@ -658,3 +658,117 @@ class TestEmailContentNotStored:
         assert email_row.provider == "gmail"
         assert email_row.user_id == "user_hash_privacy_test"
         assert email_row.received_at is not None
+
+
+class TestScoringFixes:
+    """Scoring rules: the authenticity cap runs after the domain points, a
+    failed LLM step renormalizes the remaining weights, a confirmed Safe
+    Browsing threat can never be 'safe', and PhishTank adds nothing. All
+    inputs are fake objects - no network."""
+
+    @staticmethod
+    def _clean_auth():
+        return AuthResult(spf='pass', dkim='pass', dmarc='pass', alignment=True, details={})
+
+    @staticmethod
+    def _max_auth():
+        # 40 (spf fail) + 30 (dkim fail) + 25 (dmarc fail) + 20 (no alignment) = 115
+        return AuthResult(spf='fail', dkim='fail', dmarc='fail', alignment=False, details={})
+
+    @staticmethod
+    def _lookalike_domain():
+        # +15 (new domain) + 35 (lookalike): 115 + 50 = 165 before the cap
+        return DomainAnalysis(
+            domain='paypa1.example.com',
+            domain_age_days=5,
+            is_new_domain=True,
+            homoglyph_match='paypal',
+            homoglyph_distance=1,
+            registrar=None,
+            registration_date=None
+        )
+
+    @staticmethod
+    def _clean_urls():
+        from app.services.url_reputation import URLReputationResult
+        return [URLReputationResult(url='https://example.com', safe_browsing={'threats': []}, phishtank=False, anchor_mismatch=False)]
+
+    @staticmethod
+    def _llm(score=0, tactics=None, summary='', confidence=0.0):
+        from app.services.llm_analysis import LLMAnalysisResult
+        return LLMAnalysisResult(
+            manipulation_score=score,
+            tactics=tactics if tactics is not None else [],
+            summary=summary,
+            confidence=confidence
+        )
+
+    def test_authenticity_points_above_100_stay_capped_after_domain_bonus(self):
+        # Old behavior: the cap ran BEFORE +15/+35, so authenticity reached 150
+        # and this scored 60. The cap now yields exactly 100 -> 100*0.4 = 40.
+        result = calculate_verdict(self._max_auth(), self._lookalike_domain(), self._clean_urls(), self._llm())
+        assert result.score == 40
+        assert 0 <= result.score <= 100
+        # The domain reasons are still reported alongside the capped score
+        details = [r["detail"] for r in result.reasons]
+        assert any("registered recently" in d for d in details)
+        assert any("resembles known brand" in d for d in details)
+
+    def test_llm_unavailable_renormalizes_to_authenticity_and_urls(self):
+        # Authenticity 100, urls 0, LLM dead: (100*0.4 + 0*0.3) / 0.7 = 57.14
+        # -> 57 (suspicious), not the old 40 (safe)
+        llm = self._llm(tactics=['llm_unavailable'], summary='LLM analysis unavailable - no API key configured')
+        result = calculate_verdict(self._max_auth(), self._lookalike_domain(), self._clean_urls(), llm)
+        assert result.score == 57
+        assert result.verdict == 'suspicious'
+
+    def test_llm_unavailable_with_clean_email_is_safe_and_explains(self):
+        llm = self._llm(tactics=['llm_error'], summary='LLM analysis failed: boom')
+        result = calculate_verdict(self._clean_auth(), None, self._clean_urls(), llm)
+        assert result.verdict == 'safe'
+        assert result.score == 0
+        details = [r["detail"] for r in result.reasons]
+        # The one explanatory reason is present...
+        assert "AI content analysis was unavailable, so the score uses authenticity and link checks only" in details
+        # ...while the sentinel never becomes a "Detected ..." reason and the
+        # exception text never reaches a user-facing reason
+        assert not any("Detected llm_error" in d for d in details)
+        assert not any("boom" in d for d in details)
+
+    def test_safe_browsing_threat_with_clean_email_forces_dangerous(self):
+        from app.services.url_reputation import URLReputationResult
+        urls = [URLReputationResult(
+            url='https://evil.example.com',
+            safe_browsing={'threats': ['SOCIAL_ENGINEERING']},
+            phishtank=False,
+            anchor_mismatch=False
+        )]
+        result = calculate_verdict(self._clean_auth(), None, urls, self._llm())
+        # The weighted score would be only 12; the confirmed threat floors it at 70
+        assert result.score == 70
+        assert result.verdict == 'dangerous'
+
+    def test_working_llm_keeps_original_weights(self):
+        # 45 authenticity (dkim none +15, dmarc none +10, no alignment +20;
+        # spf pass adds nothing), 0 urls, 40 llm -> int(18 + 12) = 30
+        auth = AuthResult(spf='pass', dkim='none', dmarc='none', alignment=False, details={})
+        llm = self._llm(score=40, tactics=['urgency'], summary='Marketing email with urgency', confidence=0.8)
+        result = calculate_verdict(auth, None, self._clean_urls(), llm)
+        assert result.score == 30
+        assert result.verdict == 'suspicious'
+        assert any("Uses urgency tactic" in r["detail"] for r in result.reasons)
+
+    def test_phishtank_adds_no_score_and_no_reason(self):
+        # Rule (d): PhishTank must not be used - a phishtank hit changes
+        # neither the score nor the reasons
+        from app.services.url_reputation import URLReputationResult
+        phish_urls = [URLReputationResult(
+            url='https://listed.example.com',
+            safe_browsing={'threats': []},
+            phishtank=True,
+            anchor_mismatch=False
+        )]
+        clean = calculate_verdict(self._clean_auth(), None, self._clean_urls(), self._llm())
+        flagged = calculate_verdict(self._clean_auth(), None, phish_urls, self._llm())
+        assert flagged.score == clean.score == 0
+        assert not any("PhishTank" in r["detail"] for r in flagged.reasons)

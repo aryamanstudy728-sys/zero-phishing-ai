@@ -104,8 +104,6 @@ def calculate_verdict(
             "severity": "high"
         })
 
-    authenticity_score = min(100, authenticity_score)
-
     # Domain scoring (only when domain lookup succeeded)
     if domain is not None:
         if domain.is_new_domain:
@@ -124,16 +122,16 @@ def calculate_verdict(
                 "severity": "high",
             })
 
+    # Cap only AFTER all authenticity points, including the domain-age (+15)
+    # and lookalike-domain (+35) bonuses, so the 0-100 meaning holds for the
+    # weighted score below
+    authenticity_score = min(100, authenticity_score)
+
     # URL reputation scoring
     for url_result in url_results:
-        if url_result.phishtank:
-            url_score += 50
-            reasons.append({
-                "category": "url_reputation",
-                "detail": f"URL found in PhishTank database: {url_result.url}",
-                "severity": "critical"
-            })
-
+        # PhishTank is intentionally NOT used (we cannot rely on this data):
+        # url_result.phishtank is still carried on the result object, but it
+        # adds no score and no reason. Full removal is a later cleanup.
         if url_result.safe_browsing.get("threats"):
             threats = url_result.safe_browsing["threats"]
             url_score += 40
@@ -146,42 +144,66 @@ def calculate_verdict(
     url_score = min(100, url_score)
 
     # LLM scoring
-    if llm.tactics:
-        for tactic in llm.tactics:
-            if tactic in ["credential_request", "payment_request"]:
-                reasons.append({
-                    "category": "content",
-                    "detail": f"Requests sensitive action: {tactic.replace('_', ' ')}",
-                    "severity": "critical"
-                })
-            elif tactic in ["urgency", "fear", "authority"]:
-                reasons.append({
-                    "category": "content",
-                    "detail": f"Uses {tactic} tactic to pressure recipient",
-                    "severity": "high"
-                })
-            else:
-                reasons.append({
-                    "category": "content",
-                    "detail": f"Detected {tactic} tactic",
-                    "severity": "medium"
-                })
+    # When the LLM step fails, analyze_content returns manipulation_score 0
+    # with an "llm_unavailable"/"llm_error" sentinel tactic. Renormalize the
+    # two remaining weights instead of silently granting the AI 30% at zero
+    # (which would make phishing look safer), and never surface the failure
+    # text as a user-facing reason.
+    llm_failed = any(tactic in ("llm_unavailable", "llm_error") for tactic in llm.tactics)
 
-    # Add LLM summary as a reason
-    if llm.summary:
+    if llm_failed:
         reasons.append({
             "category": "content",
-            "detail": llm.summary,
-            "severity": "medium" if llm.manipulation_score < 50 else "high"
+            "detail": "AI content analysis was unavailable, so the score uses authenticity and link checks only",
+            "severity": "low"
         })
+    else:
+        if llm.tactics:
+            for tactic in llm.tactics:
+                if tactic in ["credential_request", "payment_request"]:
+                    reasons.append({
+                        "category": "content",
+                        "detail": f"Requests sensitive action: {tactic.replace('_', ' ')}",
+                        "severity": "critical"
+                    })
+                elif tactic in ["urgency", "fear", "authority"]:
+                    reasons.append({
+                        "category": "content",
+                        "detail": f"Uses {tactic} tactic to pressure recipient",
+                        "severity": "high"
+                    })
+                else:
+                    reasons.append({
+                        "category": "content",
+                        "detail": f"Detected {tactic} tactic",
+                        "severity": "medium"
+                    })
+
+        # Add LLM summary as a reason (skipped on failure: the summary is the
+        # failure text there, and exception text must not reach users)
+        if llm.summary:
+            reasons.append({
+                "category": "content",
+                "detail": llm.summary,
+                "severity": "medium" if llm.manipulation_score < 50 else "high"
+            })
 
     # Calculate weighted score
-    score = int(
-        authenticity_score * 0.4 +
-        url_score * 0.3 +
-        llm_score * 0.3
-    )
+    if llm_failed:
+        # The AI contributed nothing: renormalize the authenticity and URL
+        # weights so the 0-70 range maps onto the full 0-100 scale
+        score = int((authenticity_score * 0.4 + url_score * 0.3) / 0.7)
+    else:
+        score = int(
+            authenticity_score * 0.4 +
+            url_score * 0.3 +
+            llm_score * 0.3
+        )
     score = max(0, min(100, score))
+
+    # A confirmed Google Safe Browsing threat must never end up "safe"
+    if any(url_result.safe_browsing.get("threats") for url_result in url_results):
+        score = max(score, 70)
 
     # Determine verdict
     if score >= 70:
