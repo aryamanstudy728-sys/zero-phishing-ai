@@ -340,6 +340,36 @@ class TestUserIsolation:
         assert v2.score == 10
 
 
+@pytest.fixture
+def fake_analyses(monkeypatch):
+    """Replace analyze_domain/analyze_urls/analyze_content so no network is used."""
+    from app.services.url_reputation import URLReputationResult
+    from app.services.llm_analysis import LLMAnalysisResult
+
+    async def fake_analyze_urls(urls, html=None):
+        return [
+            URLReputationResult(
+                url=url,
+                safe_browsing={"threats": []},
+                phishtank=False,
+                anchor_mismatch=False,
+            )
+            for url in urls
+        ]
+
+    async def fake_analyze_content(headers, body_text, body_html, urls):
+        return LLMAnalysisResult(
+            manipulation_score=5,
+            tactics=[],
+            summary="Legitimate email",
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr("app.services.verdict.analyze_domain", lambda domain: None)
+    monkeypatch.setattr("app.services.verdict.analyze_urls", fake_analyze_urls)
+    monkeypatch.setattr("app.services.verdict.analyze_content", fake_analyze_content)
+
+
 class TestAnalyzeEmailResponseIds:
     """analyze_email must return valid UUID strings for analysis_id and email_id,
     because VerdictResponse validates both as UUID (a missing id is the string 'None')."""
@@ -354,35 +384,6 @@ class TestAnalyzeEmailResponseIds:
         " dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com\r\n"
         "Subject: Test"
     )
-
-    @pytest.fixture
-    def fake_analyses(self, monkeypatch):
-        """Replace analyze_domain/analyze_urls/analyze_content so no network is used."""
-        from app.services.url_reputation import URLReputationResult
-        from app.services.llm_analysis import LLMAnalysisResult
-
-        async def fake_analyze_urls(urls, html=None):
-            return [
-                URLReputationResult(
-                    url=url,
-                    safe_browsing={"threats": []},
-                    phishtank=False,
-                    anchor_mismatch=False,
-                )
-                for url in urls
-            ]
-
-        async def fake_analyze_content(headers, body_text, body_html, urls):
-            return LLMAnalysisResult(
-                manipulation_score=5,
-                tactics=[],
-                summary="Legitimate email",
-                confidence=0.9,
-            )
-
-        monkeypatch.setattr("app.services.verdict.analyze_domain", lambda domain: None)
-        monkeypatch.setattr("app.services.verdict.analyze_urls", fake_analyze_urls)
-        monkeypatch.setattr("app.services.verdict.analyze_content", fake_analyze_content)
 
     async def _analyze(self, db_session):
         from app.services.verdict import analyze_email
@@ -493,3 +494,82 @@ class TestEngagementTags:
         tags = await get_sender_tags(db_session, "eng_user_e")
 
         assert tags["chatty@corp.example.com"] == "low-engagement"
+
+
+class TestIntegrityErrorRecovery:
+    """A concurrent same-message analysis must not 500: the IntegrityError
+    path waits (bounded) for the winner's rows and returns them."""
+
+    @staticmethod
+    async def _analyze(db_session, message_id):
+        from app.services.verdict import analyze_email
+        return await analyze_email(
+            db=db_session,
+            user_hash="user_hash_race_test",
+            message_id=message_id,
+            provider="gmail",
+            headers_raw=TestAnalyzeEmailResponseIds.HEADERS,
+            body_text="Hello, please verify your account.",
+            body_html="<p>Hello, please verify your account.</p>",
+            urls=["https://example.com/verify"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_race_returns_the_winning_stored_analysis(self, db_session, fake_analyses, monkeypatch):
+        first = await self._analyze(db_session, "race-msg-1")
+        # The winner's rows must be committed to survive our rollback, as they
+        # would be in the real concurrent scenario
+        await db_session.commit()
+
+        import app.services.verdict as verdict_module
+        real_find_email = verdict_module._find_email
+        calls = {"n": 0}
+
+        async def flaky_find_email(db, user_hash, message_id, provider):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Simulate the pre-save cache check missing the winner
+                return None
+            return await real_find_email(db, user_hash, message_id, provider)
+
+        monkeypatch.setattr("app.services.verdict._find_email", flaky_find_email)
+
+        raced = await self._analyze(db_session, "race-msg-1")
+
+        # The IntegrityError actually fired (not a plain cache hit), and the
+        # recovery returned the winner's stored ids
+        assert calls["n"] >= 2
+        assert raced["analysis_id"] == first["analysis_id"]
+        assert raced["email_id"] == first["email_id"]
+
+    @pytest.mark.asyncio
+    async def test_recovery_is_bounded_and_reraises_when_nothing_is_stored(self, db_session, fake_analyses, monkeypatch):
+        # Commit a conflicting (user, message, provider) row so the save fails,
+        # while the lookup stays blind: the winner "never appears"
+        db_session.add(Email(
+            message_id="race-msg-2",
+            provider="gmail",
+            user_id="user_hash_race_test",
+            headers_raw="From: test@example.com",
+            body_text="stored",
+            body_html=None,
+            urls=[],
+            received_at=datetime.now(timezone.utc),
+        ))
+        await db_session.commit()
+
+        import app.services.verdict as verdict_module
+        calls = {"n": 0}
+
+        async def blind_find_email(db, user_hash, message_id, provider):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr("app.services.verdict._find_email", blind_find_email)
+
+        from sqlalchemy.exc import IntegrityError
+        with pytest.raises(IntegrityError):
+            await self._analyze(db_session, "race-msg-2")
+
+        # 1 cache-check call + the bounded recovery attempts, and no more
+        assert calls["n"] == 1 + verdict_module._INTEGRITY_RECOVERY_ATTEMPTS
