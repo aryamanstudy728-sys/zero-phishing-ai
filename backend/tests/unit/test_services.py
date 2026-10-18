@@ -203,3 +203,89 @@ class TestUserIsolation:
         v2 = v2_result.scalar_one()
         assert v2.verdict == "safe"
         assert v2.score == 10
+
+
+class TestAnalyzeEmailResponseIds:
+    """analyze_email must return valid UUID strings for analysis_id and email_id,
+    because VerdictResponse validates both as UUID (a missing id is the string 'None')."""
+
+    # Complete Authentication-Results so verify_authenticity does not fall back
+    # to live DNS checks (the analysis helpers themselves are faked below).
+    HEADERS = (
+        "From: John Doe <john@example.com>\r\n"
+        "Authentication-Results: mx.google.com;\r\n"
+        " dkim=pass header.i=@example.com header.s=sel1;\r\n"
+        " spf=pass (google.com: domain of bounce@mail.example.com designates 203.0.113.5 as permitted sender) smtp.mailfrom=bounce@mail.example.com;\r\n"
+        " dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com\r\n"
+        "Subject: Test"
+    )
+
+    @pytest.fixture
+    def fake_analyses(self, monkeypatch):
+        """Replace analyze_domain/analyze_urls/analyze_content so no network is used."""
+        from app.services.url_reputation import URLReputationResult
+        from app.services.llm_analysis import LLMAnalysisResult
+
+        async def fake_analyze_urls(urls, html=None):
+            return [
+                URLReputationResult(
+                    url=url,
+                    safe_browsing={"threats": []},
+                    phishtank=False,
+                    anchor_mismatch=False,
+                )
+                for url in urls
+            ]
+
+        async def fake_analyze_content(headers, body_text, body_html, urls):
+            return LLMAnalysisResult(
+                manipulation_score=5,
+                tactics=[],
+                summary="Legitimate email",
+                confidence=0.9,
+            )
+
+        monkeypatch.setattr("app.services.verdict.analyze_domain", lambda domain: None)
+        monkeypatch.setattr("app.services.verdict.analyze_urls", fake_analyze_urls)
+        monkeypatch.setattr("app.services.verdict.analyze_content", fake_analyze_content)
+
+    async def _analyze(self, db_session):
+        from app.services.verdict import analyze_email
+        return await analyze_email(
+            db=db_session,
+            user_hash="user_hash_uuid_test",
+            message_id="uuid-msg-1",
+            provider="gmail",
+            headers_raw=self.HEADERS,
+            body_text="Hello, please verify your account.",
+            body_html="<p>Hello, please verify your account.</p>",
+            urls=["https://example.com/verify"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_new_analysis_returns_valid_uuids(self, db_session, fake_analyses):
+        result = await self._analyze(db_session)
+
+        # 'None' would raise ValueError here; valid UUIDs must round-trip
+        assert str(uuid.UUID(result["analysis_id"])) == result["analysis_id"]
+        assert str(uuid.UUID(result["email_id"])) == result["email_id"]
+        assert result["analysis_id"] != result["email_id"]
+
+        # The returned dict must pass VerdictResponse validation
+        from app.schemas import VerdictResponse
+        response = VerdictResponse.model_validate(result)
+        assert str(response.analysis_id) == result["analysis_id"]
+        assert str(response.email_id) == result["email_id"]
+
+    @pytest.mark.asyncio
+    async def test_cached_call_returns_same_ids(self, db_session, fake_analyses):
+        first = await self._analyze(db_session)
+        second = await self._analyze(db_session)
+
+        # Same analysis_id (cached verdict) and same email_id (same email row)
+        assert second["analysis_id"] == first["analysis_id"]
+        assert second["email_id"] == first["email_id"]
+
+        # The cached response must also pass VerdictResponse validation
+        from app.schemas import VerdictResponse
+        VerdictResponse.model_validate(second)

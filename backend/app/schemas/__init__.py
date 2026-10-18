@@ -43,6 +43,7 @@ class VerdictResponse(BaseModel):
     score: int = Field(..., ge=0, le=100)
     reasons: list[ReasonSchema]
     analysis_id: UUID
+    email_id: UUID
 
     class Config:
         json_schema_extra = {
@@ -54,7 +55,8 @@ class VerdictResponse(BaseModel):
                     {"category": "url_reputation", "detail": "Link to known phishing site", "severity": "critical"},
                     {"category": "content", "detail": "Urges immediate credential entry", "severity": "high"}
                 ],
-                "analysis_id": "550e8400-e29b-41d4-a716-446655440000"
+                "analysis_id": "550e8400-e29b-41d4-a716-446655440000",
+                "email_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
             }
         }
 

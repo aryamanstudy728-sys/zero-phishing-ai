@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from app.models import Email, Verdict
 from app.services.spf_dkim import verify_authenticity, AuthResult
 from app.services.domain import analyze_domain, DomainAnalysis
@@ -227,6 +228,34 @@ def calculate_verdict(
     )
 
 
+async def _find_email(db: AsyncSession, user_hash: str, message_id: str, provider: str) -> Optional[Email]:
+    """Find this user's email row for a message, or None."""
+    stmt = select(Email).where(
+        Email.message_id == message_id,
+        Email.provider == provider,
+        Email.user_id == user_hash
+    )
+    result = await db.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def _find_verdict(db: AsyncSession, email: Email) -> Optional[Verdict]:
+    """Find the stored verdict for an email, or None."""
+    result = await db.execute(select(Verdict).where(Verdict.email_id == email.id))
+    return result.scalar_one_or_none()
+
+
+def _build_response(verdict: Verdict, email: Email) -> dict:
+    """Build the API response from stored rows (ids are already assigned)."""
+    return {
+        "verdict": verdict.verdict,
+        "score": verdict.score,
+        "reasons": verdict.reasons,
+        "analysis_id": str(verdict.id),
+        "email_id": str(email.id),
+    }
+
+
 async def analyze_email(
     db: AsyncSession,
     user_hash: str,
@@ -241,26 +270,13 @@ async def analyze_email(
     start_time = datetime.now(timezone.utc)
 
     # Check if already analyzed (user isolation)
-    stmt = select(Email).where(
-        Email.message_id == message_id,
-        Email.provider == provider,
-        Email.user_id == user_hash
-    )
-    result = await db.execute(stmt)
-    email = result.scalar_one_or_none()
+    email = await _find_email(db, user_hash, message_id, provider)
 
     if email:
         # Check for existing verdict
-        verdict_stmt = select(Verdict).where(Verdict.email_id == email.id)
-        verdict_result = await db.execute(verdict_stmt)
-        existing_verdict = verdict_result.scalar_one_or_none()
+        existing_verdict = await _find_verdict(db, email)
         if existing_verdict:
-            return {
-                "verdict": existing_verdict.verdict,
-                "score": existing_verdict.score,
-                "reasons": existing_verdict.reasons,
-                "analysis_id": str(existing_verdict.id),
-            }
+            return _build_response(existing_verdict, email)
 
     # Run all analyses
     auth_result = verify_authenticity(headers_raw)
@@ -273,35 +289,43 @@ async def analyze_email(
     analysis = calculate_verdict(auth_result, domain_result, url_results, llm_result)
 
     # Save to database
-    if not email:
-        email = Email(
-            message_id=message_id,
-            provider=provider,
-            user_id=user_hash,
-            headers_raw=headers_raw,
-            body_text=body_text,
-            body_html=body_html,
-            urls=urls,
-            received_at=datetime.now(timezone.utc),
+    try:
+        if not email:
+            email = Email(
+                message_id=message_id,
+                provider=provider,
+                user_id=user_hash,
+                headers_raw=headers_raw,
+                body_text=body_text,
+                body_html=body_html,
+                urls=urls,
+                received_at=datetime.now(timezone.utc),
+            )
+            db.add(email)
+            await db.flush()
+
+        verdict = Verdict(
+            email_id=email.id,
+            verdict=analysis.verdict,
+            score=analysis.score,
+            reasons=analysis.reasons,
+            authenticity=analysis.authenticity,
+            url_reputation=analysis.url_reputation,
+            llm_analysis=analysis.llm_analysis,
+            analysis_duration_ms=int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
         )
-        db.add(email)
+        db.add(verdict)
+        # Flush so the new verdict gets its UUID before the response is built
         await db.flush()
+    except IntegrityError:
+        # The unique index (user_id, message_id, provider) rejected this save:
+        # a concurrent request analyzed the same message first. Roll back and
+        # return that stored analysis instead of a 500.
+        await db.rollback()
+        email = await _find_email(db, user_hash, message_id, provider)
+        existing_verdict = await _find_verdict(db, email) if email else None
+        if email is None or existing_verdict is None:
+            raise
+        return _build_response(existing_verdict, email)
 
-    verdict = Verdict(
-        email_id=email.id,
-        verdict=analysis.verdict,
-        score=analysis.score,
-        reasons=analysis.reasons,
-        authenticity=analysis.authenticity,
-        url_reputation=analysis.url_reputation,
-        llm_analysis=analysis.llm_analysis,
-        analysis_duration_ms=int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
-    )
-    db.add(verdict)
-
-    return {
-        "verdict": analysis.verdict,
-        "score": analysis.score,
-        "reasons": analysis.reasons,
-        "analysis_id": str(verdict.id),
-    }
+    return _build_response(verdict, email)
