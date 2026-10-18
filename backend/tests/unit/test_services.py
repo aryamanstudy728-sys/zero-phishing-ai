@@ -13,14 +13,149 @@ class TestSPFDKIM:
     def test_parse_authentication_results(self):
         headers = """From: John Doe <john@example.com>
 Authentication-Results: mx.google.com; spf=pass (google.com: domain of user@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=example.com; dkim=pass header.d=example.com; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com"""
-        
+
         from app.services.spf_dkim import verify_authenticity
         result = verify_authenticity(headers)
-        # The parser extracts the full value, check that it starts with 'pass'
-        assert result.spf.startswith('pass')
-        assert result.dkim.startswith('pass')
-        assert result.dmarc.startswith('pass')
-        # alignment requires proper SPF/DKIM domain matching - skip for this test
+        # Exact values: the parser must return only the first word, lowercase
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+        assert result.alignment is True
+        assert result.details['auth_results_parsed'] is True
+
+    def test_parse_authentication_results_returns_normalized_values(self):
+        from app.services.spf_dkim import parse_authentication_results
+        results = parse_authentication_results(self.GMAIL_ALL_PASS)
+        # Only the first word of each result, never the whole text
+        assert results == {'spf': 'pass', 'dkim': 'pass', 'dmarc': 'pass'}
+
+    # Realistic synthetic headers (example.com style domains only)
+    GMAIL_ALL_PASS = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Subject: Hello\n"
+        "Authentication-Results: mx.google.com;\n"
+        "       dkim=pass header.i=@example.com header.s=sel1 header.b=AbCdEf;\n"
+        "       spf=pass (google.com: domain of bounce@mail.example.com designates 203.0.113.5 as permitted sender) smtp.mailfrom=bounce@mail.example.com;\n"
+        "       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com\n"
+    )
+
+    GMAIL_ALL_FAIL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Subject: Hello\n"
+        "Authentication-Results: mx.google.com;\n"
+        "       dkim=fail header.i=@example.com header.s=sel1;\n"
+        "       spf=fail (google.com: domain of bounce@mail.example.com designates 203.0.113.5 as permitted sender) smtp.mailfrom=bounce@mail.example.com;\n"
+        "       dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=example.com\n"
+    )
+
+    GMAIL_SOFTFAIL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Authentication-Results: mx.google.com;\n"
+        "       spf=softfail smtp.mailfrom=bounce@mail.example.com;\n"
+        "       dkim=none;\n"
+        "       dmarc=fail header.from=example.com\n"
+    )
+
+    ARC_ABOVE_REAL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "ARC-Authentication-Results: i=1; mx.google.com; spf=fail smtp.mailfrom=bounce@mail.example.com; dkim=fail; dmarc=fail\n"
+        "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=bounce@mail.example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com\n"
+    )
+
+    FORGED_BELOW_REAL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Authentication-Results: mx.google.com; spf=fail smtp.mailfrom=bounce@mail.example.com; dkim=fail header.d=example.com; dmarc=fail header.from=example.com\n"
+        "Authentication-Results: mx.google.com; spf=pass; dkim=pass header.d=example.com; dmarc=pass\n"
+    )
+
+    UNTRUSTED_AUTHSERV = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Authentication-Results: evil.example.net; spf=pass smtp.mailfrom=bounce@mail.example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com\n"
+    )
+
+    DKIM_SUBDOMAIN = (
+        "From: John Doe <john@example.com>\n"
+        "Authentication-Results: mx.google.com; spf=none; dkim=pass header.i=@news.example.com; dmarc=none header.from=example.com\n"
+    )
+
+    SPOOFED_MAILFROM = (
+        "From: PayPal Security <alerts@paypal.example.com>\n"
+        "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=bounce@evil.example.net; dkim=fail header.d=evil.example.net; dmarc=fail header.from=paypal.example.com\n"
+    )
+
+    CRLF_FOLDED = (
+        "From: Example Sender <bounce@mail.example.com>\r\n"
+        "Subject: Hello\r\n"
+        "Authentication-Results: mx.google.com;\r\n"
+        "       dkim=pass header.i=@example.com header.s=sel1;\r\n"
+        "       spf=pass smtp.mailfrom=bounce@mail.example.com;\r\n"
+        "       dmarc=pass header.from=example.com\r\n"
+    )
+
+    def test_all_pass_in_gmail_layout(self):
+        result = verify_authenticity(self.GMAIL_ALL_PASS)
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+        assert result.alignment is True
+
+    def test_all_fail_in_gmail_layout(self):
+        result = verify_authenticity(self.GMAIL_ALL_FAIL)
+        assert result.spf == 'fail'
+        assert result.dkim == 'fail'
+        assert result.dmarc == 'fail'
+        assert result.alignment is False
+
+    def test_softfail_result(self):
+        result = verify_authenticity(self.GMAIL_SOFTFAIL)
+        assert result.spf == 'softfail'
+
+    def test_arc_authentication_results_line_is_ignored(self):
+        result = verify_authenticity(self.ARC_ABOVE_REAL)
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+
+    def test_forged_lower_header_does_not_override_topmost(self):
+        result = verify_authenticity(self.FORGED_BELOW_REAL)
+        assert result.spf == 'fail'
+        assert result.dkim == 'fail'
+        assert result.dmarc == 'fail'
+
+    def test_untrusted_authserv_id_is_treated_as_missing(self):
+        result = verify_authenticity(self.UNTRUSTED_AUTHSERV)
+        assert result.spf == 'none'
+        assert result.dkim == 'none'
+        assert result.dmarc == 'none'
+        assert result.alignment is False
+        assert result.details['auth_results_parsed'] is False
+
+    def test_dkim_subdomain_is_aligned(self):
+        result = verify_authenticity(self.DKIM_SUBDOMAIN)
+        assert result.dkim == 'pass'
+        assert result.alignment is True
+
+    def test_unaligned_mailfrom_and_no_dkim_pass(self):
+        result = verify_authenticity(self.SPOOFED_MAILFROM)
+        assert result.spf == 'pass'
+        assert result.alignment is False
+
+    def test_crlf_and_folded_lines_parse_correctly(self):
+        result = verify_authenticity(self.CRLF_FOLDED)
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+        assert result.alignment is True
+
+    def test_missing_header_gives_none_without_dns(self):
+        headers = "From: John Doe <john@example.com>\nSubject: Test"
+        result = verify_authenticity(headers)
+        # No trusted header: nothing may be reported as pass (no DNS fallback)
+        assert result.spf == 'none'
+        assert result.dkim == 'none'
+        assert result.dmarc == 'none'
+        assert result.alignment is False
+        assert result.details['auth_results_parsed'] is False
 
     def test_extract_from_domain(self):
         headers = "From: John Doe <john@example.com>\nSubject: Test"
@@ -205,6 +340,36 @@ class TestUserIsolation:
         assert v2.score == 10
 
 
+@pytest.fixture
+def fake_analyses(monkeypatch):
+    """Replace analyze_domain/analyze_urls/analyze_content so no network is used."""
+    from app.services.url_reputation import URLReputationResult
+    from app.services.llm_analysis import LLMAnalysisResult
+
+    async def fake_analyze_urls(urls, html=None):
+        return [
+            URLReputationResult(
+                url=url,
+                safe_browsing={"threats": []},
+                phishtank=False,
+                anchor_mismatch=False,
+            )
+            for url in urls
+        ]
+
+    async def fake_analyze_content(headers, body_text, body_html, urls):
+        return LLMAnalysisResult(
+            manipulation_score=5,
+            tactics=[],
+            summary="Legitimate email",
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr("app.services.verdict.analyze_domain", lambda domain: None)
+    monkeypatch.setattr("app.services.verdict.analyze_urls", fake_analyze_urls)
+    monkeypatch.setattr("app.services.verdict.analyze_content", fake_analyze_content)
+
+
 class TestAnalyzeEmailResponseIds:
     """analyze_email must return valid UUID strings for analysis_id and email_id,
     because VerdictResponse validates both as UUID (a missing id is the string 'None')."""
@@ -219,35 +384,6 @@ class TestAnalyzeEmailResponseIds:
         " dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com\r\n"
         "Subject: Test"
     )
-
-    @pytest.fixture
-    def fake_analyses(self, monkeypatch):
-        """Replace analyze_domain/analyze_urls/analyze_content so no network is used."""
-        from app.services.url_reputation import URLReputationResult
-        from app.services.llm_analysis import LLMAnalysisResult
-
-        async def fake_analyze_urls(urls, html=None):
-            return [
-                URLReputationResult(
-                    url=url,
-                    safe_browsing={"threats": []},
-                    phishtank=False,
-                    anchor_mismatch=False,
-                )
-                for url in urls
-            ]
-
-        async def fake_analyze_content(headers, body_text, body_html, urls):
-            return LLMAnalysisResult(
-                manipulation_score=5,
-                tactics=[],
-                summary="Legitimate email",
-                confidence=0.9,
-            )
-
-        monkeypatch.setattr("app.services.verdict.analyze_domain", lambda domain: None)
-        monkeypatch.setattr("app.services.verdict.analyze_urls", fake_analyze_urls)
-        monkeypatch.setattr("app.services.verdict.analyze_content", fake_analyze_content)
 
     async def _analyze(self, db_session):
         from app.services.verdict import analyze_email
@@ -289,3 +425,151 @@ class TestAnalyzeEmailResponseIds:
         # The cached response must also pass VerdictResponse validation
         from app.schemas import VerdictResponse
         VerdictResponse.model_validate(second)
+
+
+class TestEngagementTags:
+    """get_sender_tags must count opens only from event_type == 'open' and
+    return only the current user's senders."""
+
+    @staticmethod
+    async def _add_event(db, user_hash, sender, event_type, duration_ms=None):
+        from app.models import EngagementEvent
+        db.add(EngagementEvent(
+            email_id=None,
+            user_id=user_hash,
+            sender_email=sender,
+            sender_domain=sender.split('@')[-1],
+            event_type=event_type,
+            duration_ms=duration_ms,
+        ))
+        await db.flush()
+
+    @pytest.mark.asyncio
+    async def test_user_only_gets_tags_for_own_senders(self, db_session):
+        # User A: newsletter sender
+        for _ in range(11):
+            await self._add_event(db_session, "eng_user_a", "news@example.com", "open")
+        # User B: priority sender
+        for _ in range(3):
+            await self._add_event(db_session, "eng_user_b", "boss@corp.example.com", "open")
+        await self._add_event(db_session, "eng_user_b", "boss@corp.example.com", "reply")
+
+        from app.services.engagement import get_sender_tags
+        tags_a = await get_sender_tags(db_session, "eng_user_a")
+        tags_b = await get_sender_tags(db_session, "eng_user_b")
+
+        assert tags_a == {"news@example.com": "newsletter"}
+        assert tags_b == {"boss@corp.example.com": "priority"}
+
+    @pytest.mark.asyncio
+    async def test_many_opens_and_no_replies_is_newsletter(self, db_session):
+        for _ in range(11):
+            await self._add_event(db_session, "eng_user_c", "weekly@news.example.com", "open")
+
+        from app.services.engagement import get_sender_tags
+        tags = await get_sender_tags(db_session, "eng_user_c")
+
+        assert tags["weekly@news.example.com"] == "newsletter"
+
+    @pytest.mark.asyncio
+    async def test_replies_with_more_than_two_opens_is_priority(self, db_session):
+        for _ in range(3):
+            await self._add_event(db_session, "eng_user_d", "lead@corp.example.com", "open")
+        await self._add_event(db_session, "eng_user_d", "lead@corp.example.com", "reply")
+
+        from app.services.engagement import get_sender_tags
+        tags = await get_sender_tags(db_session, "eng_user_d")
+
+        assert tags["lead@corp.example.com"] == "priority"
+
+    @pytest.mark.asyncio
+    async def test_reply_events_are_not_counted_as_opens(self, db_session):
+        # Replies and dwell events must not inflate the open count: 5 replies
+        # and no opens means opens == 0 -> low-engagement, not priority.
+        for _ in range(5):
+            await self._add_event(db_session, "eng_user_e", "chatty@corp.example.com", "reply")
+        await self._add_event(db_session, "eng_user_e", "chatty@corp.example.com", "dwell", duration_ms=5000)
+
+        from app.services.engagement import get_sender_tags
+        tags = await get_sender_tags(db_session, "eng_user_e")
+
+        assert tags["chatty@corp.example.com"] == "low-engagement"
+
+
+class TestIntegrityErrorRecovery:
+    """A concurrent same-message analysis must not 500: the IntegrityError
+    path waits (bounded) for the winner's rows and returns them."""
+
+    @staticmethod
+    async def _analyze(db_session, message_id):
+        from app.services.verdict import analyze_email
+        return await analyze_email(
+            db=db_session,
+            user_hash="user_hash_race_test",
+            message_id=message_id,
+            provider="gmail",
+            headers_raw=TestAnalyzeEmailResponseIds.HEADERS,
+            body_text="Hello, please verify your account.",
+            body_html="<p>Hello, please verify your account.</p>",
+            urls=["https://example.com/verify"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_race_returns_the_winning_stored_analysis(self, db_session, fake_analyses, monkeypatch):
+        first = await self._analyze(db_session, "race-msg-1")
+        # The winner's rows must be committed to survive our rollback, as they
+        # would be in the real concurrent scenario
+        await db_session.commit()
+
+        import app.services.verdict as verdict_module
+        real_find_email = verdict_module._find_email
+        calls = {"n": 0}
+
+        async def flaky_find_email(db, user_hash, message_id, provider):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Simulate the pre-save cache check missing the winner
+                return None
+            return await real_find_email(db, user_hash, message_id, provider)
+
+        monkeypatch.setattr("app.services.verdict._find_email", flaky_find_email)
+
+        raced = await self._analyze(db_session, "race-msg-1")
+
+        # The IntegrityError actually fired (not a plain cache hit), and the
+        # recovery returned the winner's stored ids
+        assert calls["n"] >= 2
+        assert raced["analysis_id"] == first["analysis_id"]
+        assert raced["email_id"] == first["email_id"]
+
+    @pytest.mark.asyncio
+    async def test_recovery_is_bounded_and_reraises_when_nothing_is_stored(self, db_session, fake_analyses, monkeypatch):
+        # Commit a conflicting (user, message, provider) row so the save fails,
+        # while the lookup stays blind: the winner "never appears"
+        db_session.add(Email(
+            message_id="race-msg-2",
+            provider="gmail",
+            user_id="user_hash_race_test",
+            headers_raw="From: test@example.com",
+            body_text="stored",
+            body_html=None,
+            urls=[],
+            received_at=datetime.now(timezone.utc),
+        ))
+        await db_session.commit()
+
+        import app.services.verdict as verdict_module
+        calls = {"n": 0}
+
+        async def blind_find_email(db, user_hash, message_id, provider):
+            calls["n"] += 1
+            return None
+
+        monkeypatch.setattr("app.services.verdict._find_email", blind_find_email)
+
+        from sqlalchemy.exc import IntegrityError
+        with pytest.raises(IntegrityError):
+            await self._analyze(db_session, "race-msg-2")
+
+        # 1 cache-check call + the bounded recovery attempts, and no more
+        assert calls["n"] == 1 + verdict_module._INTEGRITY_RECOVERY_ATTEMPTS

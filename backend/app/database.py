@@ -1,6 +1,5 @@
 # Database configuration and session management
 
-from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from app.config import get_settings
@@ -27,9 +26,14 @@ class Base(DeclarativeBase):
     pass
 
 
-@asynccontextmanager
 async def get_db_session():
-    """Dependency for FastAPI to get DB session."""
+    """Dependency for FastAPI to get DB session.
+
+    Written as a plain async generator (not @asynccontextmanager): FastAPI
+    detects @asynccontextmanager functions through their __wrapped__ async
+    generator and wraps them a second time, which raises TypeError on every
+    request that reaches this dependency.
+    """
     async with async_session_maker() as session:
         try:
             yield session

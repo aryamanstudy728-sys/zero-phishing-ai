@@ -35,7 +35,8 @@ async def get_sender_tags(db: AsyncSession, user_hash: str) -> dict[str, str]:
 
     stmt = select(
         EngagementEvent.sender_email,
-        func.count(EngagementEvent.id).label("open_count"),
+        # Opens count only real 'open' events, not replies or dwell events
+        func.sum(case((EngagementEvent.event_type == "open", 1), else_=0)).label("open_count"),
         func.sum(case((EngagementEvent.event_type == "reply", 1), else_=0)).label("reply_count"),
         func.avg(EngagementEvent.duration_ms).label("avg_dwell"),
     ).where(

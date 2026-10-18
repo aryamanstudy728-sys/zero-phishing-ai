@@ -1,5 +1,6 @@
 # Verdict aggregation logic
 
+import asyncio
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -256,6 +257,35 @@ def _build_response(verdict: Verdict, email: Email) -> dict:
     }
 
 
+_INTEGRITY_RECOVERY_ATTEMPTS = 3
+_INTEGRITY_RECOVERY_DELAY_SECONDS = 0.1
+
+
+async def _recover_stored_analysis(
+    db: AsyncSession,
+    user_hash: str,
+    message_id: str,
+    provider: str,
+) -> Optional[dict]:
+    """After an IntegrityError, return the analysis the winning request stored.
+
+    The winner may still be mid-transaction (its rows stay invisible to us
+    until it commits), so retry the lookup a bounded number of times with a
+    short linear backoff. Returns None when nothing is stored yet; the caller
+    then re-raises the IntegrityError rather than looping forever.
+    """
+    for attempt in range(_INTEGRITY_RECOVERY_ATTEMPTS):
+        await db.rollback()
+        email = await _find_email(db, user_hash, message_id, provider)
+        if email:
+            existing_verdict = await _find_verdict(db, email)
+            if existing_verdict:
+                return _build_response(existing_verdict, email)
+        if attempt < _INTEGRITY_RECOVERY_ATTEMPTS - 1:
+            await asyncio.sleep(_INTEGRITY_RECOVERY_DELAY_SECONDS * (attempt + 1))
+    return None
+
+
 async def analyze_email(
     db: AsyncSession,
     user_hash: str,
@@ -279,7 +309,7 @@ async def analyze_email(
             return _build_response(existing_verdict, email)
 
     # Run all analyses
-    auth_result = verify_authenticity(headers_raw)
+    auth_result = verify_authenticity(headers_raw, provider)
     from_domain = auth_result.details.get('from_domain', '')
     domain_result = analyze_domain(from_domain) if from_domain else None
     url_results = await analyze_urls(urls, body_html)
@@ -319,13 +349,12 @@ async def analyze_email(
         await db.flush()
     except IntegrityError:
         # The unique index (user_id, message_id, provider) rejected this save:
-        # a concurrent request analyzed the same message first. Roll back and
-        # return that stored analysis instead of a 500.
-        await db.rollback()
-        email = await _find_email(db, user_hash, message_id, provider)
-        existing_verdict = await _find_verdict(db, email) if email else None
-        if email is None or existing_verdict is None:
+        # a concurrent request analyzed the same message first. Give that
+        # request a bounded moment to commit, then return its stored analysis
+        # instead of a 500; if it never appears, re-raise.
+        stored = await _recover_stored_analysis(db, user_hash, message_id, provider)
+        if stored is None:
             raise
-        return _build_response(existing_verdict, email)
+        return stored
 
     return _build_response(verdict, email)
