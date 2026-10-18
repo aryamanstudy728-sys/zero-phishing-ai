@@ -321,14 +321,12 @@ async def analyze_email(
     # Save to database
     try:
         if not email:
+            # Privacy: the raw email content is used for the analysis above
+            # but never stored on the Email row
             email = Email(
                 message_id=message_id,
                 provider=provider,
                 user_id=user_hash,
-                headers_raw=headers_raw,
-                body_text=body_text,
-                body_html=body_html,
-                urls=urls,
                 received_at=datetime.now(timezone.utc),
             )
             db.add(email)

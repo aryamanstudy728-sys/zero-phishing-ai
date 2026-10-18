@@ -16,10 +16,11 @@ class Email(Base):
     message_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     provider: Mapped[str] = mapped_column(String(20), nullable=False)  # gmail, outlook
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # hashed user identifier
-    headers_raw: Mapped[str] = mapped_column(Text, nullable=False)
-    body_text: Mapped[str] = mapped_column(Text, nullable=False)
+    # Privacy: the raw email content is analyzed but never stored
+    headers_raw: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    body_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     body_html: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    urls: Mapped[list[str]] = mapped_column(JSON, default=list)
+    urls: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

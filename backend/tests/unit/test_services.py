@@ -573,3 +573,88 @@ class TestIntegrityErrorRecovery:
 
         # 1 cache-check call + the bounded recovery attempts, and no more
         assert calls["n"] == 1 + verdict_module._INTEGRITY_RECOVERY_ATTEMPTS
+
+
+class TestEmailContentNotStored:
+    """Privacy: analyze_email must use the raw email content for the analysis
+    but must never store it on the Email row."""
+
+    @pytest.fixture
+    def capturing_analyses(self, monkeypatch):
+        """Fakes that record what the analysis received (no network)."""
+        from app.services.url_reputation import URLReputationResult
+        from app.services.llm_analysis import LLMAnalysisResult
+
+        captured = {"headers": None, "body_text": None, "urls": None}
+
+        async def fake_analyze_urls(urls, html=None):
+            captured["urls"] = list(urls)
+            return [
+                URLReputationResult(
+                    url=url,
+                    safe_browsing={"threats": []},
+                    phishtank=False,
+                    anchor_mismatch=False,
+                )
+                for url in urls
+            ]
+
+        async def fake_analyze_content(headers, body_text, body_html, urls):
+            captured["headers"] = headers
+            captured["body_text"] = body_text
+            return LLMAnalysisResult(
+                manipulation_score=5,
+                tactics=[],
+                summary="Legitimate email",
+                confidence=0.9,
+            )
+
+        monkeypatch.setattr("app.services.verdict.analyze_domain", lambda domain: None)
+        monkeypatch.setattr("app.services.verdict.analyze_urls", fake_analyze_urls)
+        monkeypatch.setattr("app.services.verdict.analyze_content", fake_analyze_content)
+        return captured
+
+    @pytest.mark.asyncio
+    async def test_content_is_used_for_analysis_but_not_stored(self, db_session, capturing_analyses):
+        from sqlalchemy import select
+        from app.services.verdict import analyze_email
+        from app.schemas import VerdictResponse
+
+        result = await analyze_email(
+            db=db_session,
+            user_hash="user_hash_privacy_test",
+            message_id="privacy-msg-1",
+            provider="gmail",
+            headers_raw=TestAnalyzeEmailResponseIds.HEADERS,
+            body_text="Hello, please verify your account.",
+            body_html="<p>Hello, please verify your account.</p>",
+            urls=["https://example.com/verify"],
+        )
+
+        # The response format is unchanged and still valid
+        response = VerdictResponse.model_validate(result)
+        assert response.verdict in ("safe", "suspicious", "dangerous")
+        assert isinstance(response.score, int)
+        assert 0 <= response.score <= 100
+        assert len(response.reasons) >= 0
+        assert str(response.analysis_id) == result["analysis_id"]
+        assert str(response.email_id) == result["email_id"]
+
+        # The analysis helpers received the REAL content
+        assert capturing_analyses["body_text"] == "Hello, please verify your account."
+        assert capturing_analyses["headers"] == TestAnalyzeEmailResponseIds.HEADERS
+        assert capturing_analyses["urls"] == ["https://example.com/verify"]
+
+        # But the saved Email row holds no content at all
+        email_row = (await db_session.execute(
+            select(Email).where(Email.message_id == "privacy-msg-1")
+        )).scalar_one()
+        assert email_row.headers_raw is None
+        assert email_row.body_text is None
+        assert email_row.body_html is None
+        assert email_row.urls is None
+
+        # Identity columns are kept
+        assert email_row.provider == "gmail"
+        assert email_row.user_id == "user_hash_privacy_test"
+        assert email_row.received_at is not None
