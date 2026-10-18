@@ -13,10 +13,24 @@ from fastapi import HTTPException, status
 from app.services.auth_google import verify_google_token
 
 
+@pytest.fixture(autouse=True)
+def _isolate_from_real_redis(monkeypatch):
+    """No test in this module may touch a real Redis. get_redis_client is
+    patched to resolve to None by default, so verify_google_token skips both
+    the success and failure caches. Tests that need a fake Redis override the
+    same target inside their own patch(...) context."""
+    monkeypatch.setattr(
+        "app.services.auth_google.get_redis_client",
+        AsyncMock(return_value=None),
+    )
+
+
 @pytest.mark.asyncio
 async def test_verify_google_token_non_200_response():
     """Test that non-200 response from Google returns 401."""
-    with patch("httpx.AsyncClient") as mock_client_class:
+    with patch("httpx.AsyncClient") as mock_client_class, \
+         patch("app.services.auth_google.get_redis_client") as mock_get_redis:
+        mock_get_redis.return_value = None  # No Redis: no failure cache
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
         mock_response = AsyncMock()
@@ -44,8 +58,10 @@ async def test_verify_google_token_wrong_audience():
     }
     
     with patch("httpx.AsyncClient") as mock_client_class, \
-         patch("app.config.get_settings") as mock_get_settings:
+         patch("app.config.get_settings") as mock_get_settings, \
+         patch("app.services.auth_google.get_redis_client") as mock_get_redis:
         
+        mock_get_redis.return_value = None  # No Redis: no failure cache
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
         mock_response = MagicMock()
@@ -286,7 +302,9 @@ async def test_verify_google_token_empty_client_id_server_error():
 @pytest.mark.asyncio
 async def test_verify_google_token_google_unreachable():
     """Test that when Google cannot be reached, returns 503."""
-    with patch("httpx.AsyncClient") as mock_client_class:
+    with patch("httpx.AsyncClient") as mock_client_class, \
+         patch("app.services.auth_google.get_redis_client") as mock_get_redis:
+        mock_get_redis.return_value = None  # No Redis: no failure cache
         mock_client = AsyncMock()
         mock_client_class.return_value.__aenter__.return_value = mock_client
         mock_client.get.side_effect = httpx.RequestError("Network error")
