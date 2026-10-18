@@ -424,3 +424,72 @@ class TestAnalyzeEmailResponseIds:
         # The cached response must also pass VerdictResponse validation
         from app.schemas import VerdictResponse
         VerdictResponse.model_validate(second)
+
+
+class TestEngagementTags:
+    """get_sender_tags must count opens only from event_type == 'open' and
+    return only the current user's senders."""
+
+    @staticmethod
+    async def _add_event(db, user_hash, sender, event_type, duration_ms=None):
+        from app.models import EngagementEvent
+        db.add(EngagementEvent(
+            email_id=None,
+            user_id=user_hash,
+            sender_email=sender,
+            sender_domain=sender.split('@')[-1],
+            event_type=event_type,
+            duration_ms=duration_ms,
+        ))
+        await db.flush()
+
+    @pytest.mark.asyncio
+    async def test_user_only_gets_tags_for_own_senders(self, db_session):
+        # User A: newsletter sender
+        for _ in range(11):
+            await self._add_event(db_session, "eng_user_a", "news@example.com", "open")
+        # User B: priority sender
+        for _ in range(3):
+            await self._add_event(db_session, "eng_user_b", "boss@corp.example.com", "open")
+        await self._add_event(db_session, "eng_user_b", "boss@corp.example.com", "reply")
+
+        from app.services.engagement import get_sender_tags
+        tags_a = await get_sender_tags(db_session, "eng_user_a")
+        tags_b = await get_sender_tags(db_session, "eng_user_b")
+
+        assert tags_a == {"news@example.com": "newsletter"}
+        assert tags_b == {"boss@corp.example.com": "priority"}
+
+    @pytest.mark.asyncio
+    async def test_many_opens_and_no_replies_is_newsletter(self, db_session):
+        for _ in range(11):
+            await self._add_event(db_session, "eng_user_c", "weekly@news.example.com", "open")
+
+        from app.services.engagement import get_sender_tags
+        tags = await get_sender_tags(db_session, "eng_user_c")
+
+        assert tags["weekly@news.example.com"] == "newsletter"
+
+    @pytest.mark.asyncio
+    async def test_replies_with_more_than_two_opens_is_priority(self, db_session):
+        for _ in range(3):
+            await self._add_event(db_session, "eng_user_d", "lead@corp.example.com", "open")
+        await self._add_event(db_session, "eng_user_d", "lead@corp.example.com", "reply")
+
+        from app.services.engagement import get_sender_tags
+        tags = await get_sender_tags(db_session, "eng_user_d")
+
+        assert tags["lead@corp.example.com"] == "priority"
+
+    @pytest.mark.asyncio
+    async def test_reply_events_are_not_counted_as_opens(self, db_session):
+        # Replies and dwell events must not inflate the open count: 5 replies
+        # and no opens means opens == 0 -> low-engagement, not priority.
+        for _ in range(5):
+            await self._add_event(db_session, "eng_user_e", "chatty@corp.example.com", "reply")
+        await self._add_event(db_session, "eng_user_e", "chatty@corp.example.com", "dwell", duration_ms=5000)
+
+        from app.services.engagement import get_sender_tags
+        tags = await get_sender_tags(db_session, "eng_user_e")
+
+        assert tags["chatty@corp.example.com"] == "low-engagement"
