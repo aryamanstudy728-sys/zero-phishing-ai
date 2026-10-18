@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.pem
+key.pem
+*.crx
+.DS_Store
+*.log
+
+# Local dev backend URL (no secrets); root .gitignore ignores .env.*
+!.env.development

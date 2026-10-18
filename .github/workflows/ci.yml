@@ -1,0 +1,164 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: '20'
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9.7.0
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install extension dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: ./extension
+
+      - name: Install backend dependencies
+        run: uv sync --all-extras
+        working-directory: ./backend
+
+      - name: Lint extension
+        run: pnpm lint
+        working-directory: ./extension
+
+      - name: Typecheck extension
+        run: pnpm typecheck
+        working-directory: ./extension
+
+      - name: Lint backend
+        run: uv run ruff check .
+        working-directory: ./backend
+
+      - name: Typecheck backend
+        run: uv run mypy app
+        working-directory: ./backend
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: zerophish_test
+        ports: 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9.7.0
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install extension dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: ./extension
+
+      - name: Install backend dependencies
+        run: uv sync --all-extras
+        working-directory: ./backend
+
+      - name: Run extension tests
+        run: pnpm test
+        working-directory: ./extension
+
+      - name: Run backend tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/zerophish_test
+          REDIS_URL: redis://localhost:6379/0
+          APP_ENV: test
+        run: |
+          uv run alembic upgrade head
+          uv run pytest -v
+        working-directory: ./backend
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: [lint-and-typecheck, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@9.7.0
+
+      - name: Install extension dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: ./extension
+
+      - name: Build extension
+        run: pnpm build
+        working-directory: ./extension
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-dist
+          path: extension/dist/
+          retention-days: 7
+
+      - name: Build backend Docker image
+        run: |
+          docker build -t zerophish-backend:${{ github.sha }} ./backend
+        working-directory: ./backend

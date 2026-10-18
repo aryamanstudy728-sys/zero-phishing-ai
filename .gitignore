@@ -1,0 +1,38 @@
+# --- Secrets & environment ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+key.pem
+
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Node / extension ---
+node_modules/
+dist/
+.pnpm-store/
+*.tsbuildinfo
+
+# --- Docker ---
+*.log
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- GSD / planning internals (optional, keep if you want plans tracked) ---
+# .planning/

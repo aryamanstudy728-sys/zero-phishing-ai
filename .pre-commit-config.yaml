@@ -1,0 +1,56 @@
+# Pre-commit hooks configuration
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: debug-logger
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.2.0
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.8.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [pydantic, sqlalchemy, fastapi]
+        args: [--strict]
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=500']
+
+  - repo: local
+    hooks:
+      - id: extension-lint
+        name: Extension lint
+        entry: pnpm lint
+        language: system
+        pass_filenames: false
+        working_directory: extension
+
+      - id: extension-typecheck
+        name: Extension typecheck
+        entry: pnpm typecheck
+        language: system
+        pass_filenames: false
+        working_directory: extension
+
+      - id: extension-test
+        name: Extension test
+        entry: pnpm test
+        language: system
+        pass_filenames: false
+        working_directory: extension
