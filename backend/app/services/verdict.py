@@ -279,7 +279,7 @@ async def analyze_email(
             return _build_response(existing_verdict, email)
 
     # Run all analyses
-    auth_result = verify_authenticity(headers_raw)
+    auth_result = verify_authenticity(headers_raw, provider)
     from_domain = auth_result.details.get('from_domain', '')
     domain_result = analyze_domain(from_domain) if from_domain else None
     url_results = await analyze_urls(urls, body_html)

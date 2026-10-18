@@ -9,31 +9,167 @@ from dataclasses import dataclass
 
 @dataclass
 class AuthResult:
-    spf: str  # pass, fail, softfail, neutral, none, temperror, permerror
-    dkim: str  # pass, fail, none
-    dmarc: str  # pass, fail, none
+    spf: str  # pass, fail, softfail, neutral, none, temperror, permerror, policy
+    dkim: str  # pass, fail, none, permerror, ...
+    dmarc: str  # pass, fail, none, policy, ...
     alignment: bool
     details: dict
 
 
-def parse_authentication_results(headers_raw: str) -> dict:
-    """Parse Authentication-Results header from email."""
-    results = {}
-    auth_results_match = re.search(
-        r'Authentication-Results:\s*([^\r\n]+(?:\r?\n\s+[^\r\n]+)*)',
-        headers_raw,
-        re.IGNORECASE
-    )
-    if auth_results_match:
-        auth_text = auth_results_match.group(1).replace('\r\n', ' ').replace('\n', ' ')
-        # Parse key=value pairs
-        for part in auth_text.split(';'):
-            part = part.strip()
-            if '=' in part:
-                key, value = part.split('=', 1)
-                results[key.strip().lower()] = value.strip()
-    return results
+def _topmost_auth_results_header(headers_raw: str) -> Optional[str]:
+    """Return the topmost header starting exactly with "Authentication-Results:"
+    at the start of a line (including folded continuation lines), or None.
 
+    The anchor keeps "ARC-Authentication-Results" from matching, and only the
+    first (topmost) occurrence is used: headers lower in the message can be
+    added by the sender and cannot be trusted.
+    """
+    match = re.search(
+        r'^Authentication-Results:[^\r\n]*(?:\r?\n[ \t]+[^\r\n]*)*',
+        headers_raw,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return match.group(0) if match else None
+
+
+def _unfold(header: str) -> str:
+    """Join folded continuation lines (both \\r\\n and \\n) into a single line."""
+    return re.sub(r'\r?\n[ \t]+', ' ', header)
+
+
+def _normalize_result(value: str) -> str:
+    """Lowercase first word of a result; map hardfail to fail."""
+    value = value.strip()
+    if not value:
+        return 'none'
+    word = value.split(None, 1)[0].lower()
+    return 'fail' if word == 'hardfail' else word
+
+
+def _domain_of(value: str) -> str:
+    """Domain of an address or bare domain.
+
+    Handles smtp.mailfrom with or without "@", and DKIM header.d/header.i
+    values like "example.com", "@example.com" or "user@example.com"
+    (strip a leading "@" and anything before "@").
+    """
+    value = value.strip().strip('"').lower()
+    if '@' in value:
+        value = value.split('@', 1)[1]
+    return value.rstrip('.')
+
+
+def _domains_aligned(a: str, b: str) -> bool:
+    """Aligned means equal, or one is a subdomain of the other."""
+    if not a or not b:
+        return False
+    return a == b or a.endswith('.' + b) or b.endswith('.' + a)
+
+
+def _parse_trusted_results(headers_raw: str, provider: str = "gmail") -> Optional[dict]:
+    """Parse the topmost Authentication-Results header if it is trusted for
+    `provider`. Returns None when the header is missing or untrusted."""
+    header = _topmost_auth_results_header(headers_raw)
+    if header is None:
+        return None
+
+    text = _unfold(header)
+
+    # The text before the first ';' is the authserv-id
+    authserv_text, separator, results_text = text.partition(';')
+    authserv_id = authserv_text.split(':', 1)[1].strip() if ':' in authserv_text else authserv_text.strip()
+
+    if provider == "gmail":
+        # Only the header added by Google's receiving server may be trusted.
+        if authserv_id.lower() != "mx.google.com":
+            return None
+    else:
+        # TODO: validate the authserv-id per provider (e.g. Outlook's receiving
+        # servers) once known; for now accept the topmost header for others.
+        pass
+
+    spf: Optional[str] = None
+    dmarc: Optional[str] = None
+    dkim_results: list[str] = []
+
+    if separator:
+        for clause in results_text.split(';'):
+            match = re.match(r'\s*(spf|dkim|dmarc)\s*=\s*(\S+)', clause, re.IGNORECASE)
+            if not match:
+                continue
+            name = match.group(1).lower()
+            value = _normalize_result(match.group(2))
+            if name == 'spf':
+                if spf is None:
+                    spf = value
+            elif name == 'dmarc':
+                if dmarc is None:
+                    dmarc = value
+            elif name == 'dkim':
+                dkim_results.append(value)
+
+    # Several DKIM results: pass if any is pass, otherwise the first
+    if 'pass' in dkim_results:
+        dkim = 'pass'
+    elif dkim_results:
+        dkim = dkim_results[0]
+    else:
+        dkim = 'none'
+
+    mailfrom_match = re.search(r'smtp\.mailfrom=([^\s;]+)', text, re.IGNORECASE)
+    smtp_mailfrom = mailfrom_match.group(1) if mailfrom_match else None
+
+    header_d = re.search(r'header\.d=([^\s;]+)', text, re.IGNORECASE)
+    header_i = re.search(r'header\.i=([^\s;]+)', text, re.IGNORECASE)
+    if header_d:
+        dkim_domain = _domain_of(header_d.group(1))
+    elif header_i:
+        dkim_domain = _domain_of(header_i.group(1))
+    else:
+        dkim_domain = None
+
+    return {
+        'spf': spf if spf is not None else 'none',
+        'dkim': dkim,
+        'dmarc': dmarc if dmarc is not None else 'none',
+        'smtp_mailfrom': smtp_mailfrom,
+        'dkim_domain': dkim_domain,
+    }
+
+
+def _compute_alignment(parsed: dict, from_domain: Optional[str]) -> bool:
+    """True if dmarc is pass; otherwise True if (spf is pass and the
+    smtp.mailfrom domain aligns with the From domain) or (dkim is pass and
+    the DKIM domain aligns)."""
+    if parsed['dmarc'] == 'pass':
+        return True
+    if not from_domain:
+        return False
+    from_normalized = from_domain.strip().lower().rstrip('.')
+
+    if parsed['spf'] == 'pass' and parsed['smtp_mailfrom']:
+        if _domains_aligned(_domain_of(parsed['smtp_mailfrom']), from_normalized):
+            return True
+
+    if parsed['dkim'] == 'pass' and parsed['dkim_domain']:
+        if _domains_aligned(parsed['dkim_domain'], from_normalized):
+            return True
+
+    return False
+
+
+def parse_authentication_results(headers_raw: str, provider: str = "gmail") -> dict:
+    """Parse the trusted topmost Authentication-Results header into normalized
+    first-word results for spf/dkim/dmarc (lowercase). Returns {} when there
+    is no trusted header."""
+    parsed = _parse_trusted_results(headers_raw, provider)
+    if parsed is None:
+        return {}
+    return {'spf': parsed['spf'], 'dkim': parsed['dkim'], 'dmarc': parsed['dmarc']}
+
+
+# NOTE: The DNS helpers below are intentionally unused: existence of a DNS
+# record is not a real SPF/DKIM/DMARC check. They are kept for reference.
 
 def check_spf(domain: str, ip: Optional[str] = None) -> str:
     """Check SPF record for domain."""
@@ -78,28 +214,12 @@ def check_dmarc(domain: str) -> str:
         return 'none'
 
 
-def verify_alignment(headers_raw: str, from_domain: str) -> bool:
-    """Check SPF/DKIM alignment with From domain."""
-    # Extract domains from Authentication-Results
-    spf_domain_match = re.search(r'spf=(\w+)\s+\([^)]*smtp\.mailfrom=([^;\)]+)', headers_raw)
-    dkim_domain_match = re.search(r'dkim=(\w+)\s+\([^)]*header\.d=([^;\)]+)', headers_raw)
-
-    spf_aligned = False
-    dkim_aligned = False
-
-    if spf_domain_match:
-        spf_result, spf_domain = spf_domain_match.groups()
-        spf_domain = spf_domain.strip().lower()
-        from_domain_lower = from_domain.lower()
-        spf_aligned = spf_result == 'pass' and (spf_domain == from_domain_lower or spf_domain.endswith('.' + from_domain_lower))
-
-    if dkim_domain_match:
-        dkim_result, dkim_domain = dkim_domain_match.groups()
-        dkim_domain = dkim_domain.strip().lower()
-        from_domain_lower = from_domain.lower()
-        dkim_aligned = dkim_result == 'pass' and (dkim_domain == from_domain_lower or dkim_domain.endswith('.' + from_domain_lower))
-
-    return spf_aligned or dkim_aligned
+def verify_alignment(headers_raw: str, from_domain: Optional[str], provider: str = "gmail") -> bool:
+    """Check SPF/DKIM alignment with From domain using the trusted header."""
+    parsed = _parse_trusted_results(headers_raw, provider)
+    if parsed is None:
+        return False
+    return _compute_alignment(parsed, from_domain)
 
 
 def extract_from_domain(headers_raw: str) -> Optional[str]:
@@ -119,42 +239,41 @@ def extract_sending_ip(headers_raw: str) -> Optional[str]:
     return None
 
 
-def verify_authenticity(headers_raw: str) -> AuthResult:
-    """Main function to verify email authenticity."""
+def verify_authenticity(headers_raw: str, provider: str = "gmail") -> AuthResult:
+    """Main function to verify email authenticity.
+
+    Only the topmost Authentication-Results header added by the receiving
+    server is trusted. There is no DNS fallback: a missing or untrusted
+    result is always 'none', never 'pass'.
+    """
     from_domain = extract_from_domain(headers_raw)
     sending_ip = extract_sending_ip(headers_raw)
 
-    # Parse existing Authentication-Results if present
-    auth_results = parse_authentication_results(headers_raw)
+    parsed = _parse_trusted_results(headers_raw, provider)
 
-    spf_result = auth_results.get('spf', 'none')
-    dkim_result = auth_results.get('dkim', 'none')
-    dmarc_result = auth_results.get('dmarc', 'none')
-
-    # If not in headers, perform live checks (slower)
-    if spf_result == 'none' and from_domain:
-        spf_result = check_spf(from_domain, sending_ip)
-
-    if dkim_result == 'none' and from_domain:
-        # Need selector - try common ones
-        for selector in ['default', 'google', 'selector1', 'selector2', 'k1', 'k2']:
-            dkim_result = check_dkim(from_domain, selector)
-            if dkim_result == 'pass':
-                break
-
-    if dmarc_result == 'none' and from_domain:
-        dmarc_result = check_dmarc(from_domain)
-
-    alignment = verify_alignment(headers_raw, from_domain) if from_domain else False
+    if parsed is None:
+        # No trusted Authentication-Results header: nothing may be reported
+        # as pass just because a DNS record exists.
+        return AuthResult(
+            spf='none',
+            dkim='none',
+            dmarc='none',
+            alignment=False,
+            details={
+                'from_domain': from_domain,
+                'sending_ip': sending_ip,
+                'auth_results_parsed': False,
+            },
+        )
 
     return AuthResult(
-        spf=spf_result,
-        dkim=dkim_result,
-        dmarc=dmarc_result,
-        alignment=alignment,
+        spf=parsed['spf'],
+        dkim=parsed['dkim'],
+        dmarc=parsed['dmarc'],
+        alignment=_compute_alignment(parsed, from_domain),
         details={
             'from_domain': from_domain,
             'sending_ip': sending_ip,
-            'auth_results_parsed': bool(auth_results),
-        }
+            'auth_results_parsed': True,
+        },
     )

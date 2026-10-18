@@ -13,14 +13,149 @@ class TestSPFDKIM:
     def test_parse_authentication_results(self):
         headers = """From: John Doe <john@example.com>
 Authentication-Results: mx.google.com; spf=pass (google.com: domain of user@example.com designates 1.2.3.4 as permitted sender) smtp.mailfrom=example.com; dkim=pass header.d=example.com; dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com"""
-        
+
         from app.services.spf_dkim import verify_authenticity
         result = verify_authenticity(headers)
-        # The parser extracts the full value, check that it starts with 'pass'
-        assert result.spf.startswith('pass')
-        assert result.dkim.startswith('pass')
-        assert result.dmarc.startswith('pass')
-        # alignment requires proper SPF/DKIM domain matching - skip for this test
+        # Exact values: the parser must return only the first word, lowercase
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+        assert result.alignment is True
+        assert result.details['auth_results_parsed'] is True
+
+    def test_parse_authentication_results_returns_normalized_values(self):
+        from app.services.spf_dkim import parse_authentication_results
+        results = parse_authentication_results(self.GMAIL_ALL_PASS)
+        # Only the first word of each result, never the whole text
+        assert results == {'spf': 'pass', 'dkim': 'pass', 'dmarc': 'pass'}
+
+    # Realistic synthetic headers (example.com style domains only)
+    GMAIL_ALL_PASS = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Subject: Hello\n"
+        "Authentication-Results: mx.google.com;\n"
+        "       dkim=pass header.i=@example.com header.s=sel1 header.b=AbCdEf;\n"
+        "       spf=pass (google.com: domain of bounce@mail.example.com designates 203.0.113.5 as permitted sender) smtp.mailfrom=bounce@mail.example.com;\n"
+        "       dmarc=pass (p=REJECT sp=REJECT dis=NONE) header.from=example.com\n"
+    )
+
+    GMAIL_ALL_FAIL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Subject: Hello\n"
+        "Authentication-Results: mx.google.com;\n"
+        "       dkim=fail header.i=@example.com header.s=sel1;\n"
+        "       spf=fail (google.com: domain of bounce@mail.example.com designates 203.0.113.5 as permitted sender) smtp.mailfrom=bounce@mail.example.com;\n"
+        "       dmarc=fail (p=REJECT sp=REJECT dis=NONE) header.from=example.com\n"
+    )
+
+    GMAIL_SOFTFAIL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Authentication-Results: mx.google.com;\n"
+        "       spf=softfail smtp.mailfrom=bounce@mail.example.com;\n"
+        "       dkim=none;\n"
+        "       dmarc=fail header.from=example.com\n"
+    )
+
+    ARC_ABOVE_REAL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "ARC-Authentication-Results: i=1; mx.google.com; spf=fail smtp.mailfrom=bounce@mail.example.com; dkim=fail; dmarc=fail\n"
+        "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=bounce@mail.example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com\n"
+    )
+
+    FORGED_BELOW_REAL = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Authentication-Results: mx.google.com; spf=fail smtp.mailfrom=bounce@mail.example.com; dkim=fail header.d=example.com; dmarc=fail header.from=example.com\n"
+        "Authentication-Results: mx.google.com; spf=pass; dkim=pass header.d=example.com; dmarc=pass\n"
+    )
+
+    UNTRUSTED_AUTHSERV = (
+        "From: Example Sender <bounce@mail.example.com>\n"
+        "Authentication-Results: evil.example.net; spf=pass smtp.mailfrom=bounce@mail.example.com; dkim=pass header.d=example.com; dmarc=pass header.from=example.com\n"
+    )
+
+    DKIM_SUBDOMAIN = (
+        "From: John Doe <john@example.com>\n"
+        "Authentication-Results: mx.google.com; spf=none; dkim=pass header.i=@news.example.com; dmarc=none header.from=example.com\n"
+    )
+
+    SPOOFED_MAILFROM = (
+        "From: PayPal Security <alerts@paypal.example.com>\n"
+        "Authentication-Results: mx.google.com; spf=pass smtp.mailfrom=bounce@evil.example.net; dkim=fail header.d=evil.example.net; dmarc=fail header.from=paypal.example.com\n"
+    )
+
+    CRLF_FOLDED = (
+        "From: Example Sender <bounce@mail.example.com>\r\n"
+        "Subject: Hello\r\n"
+        "Authentication-Results: mx.google.com;\r\n"
+        "       dkim=pass header.i=@example.com header.s=sel1;\r\n"
+        "       spf=pass smtp.mailfrom=bounce@mail.example.com;\r\n"
+        "       dmarc=pass header.from=example.com\r\n"
+    )
+
+    def test_all_pass_in_gmail_layout(self):
+        result = verify_authenticity(self.GMAIL_ALL_PASS)
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+        assert result.alignment is True
+
+    def test_all_fail_in_gmail_layout(self):
+        result = verify_authenticity(self.GMAIL_ALL_FAIL)
+        assert result.spf == 'fail'
+        assert result.dkim == 'fail'
+        assert result.dmarc == 'fail'
+        assert result.alignment is False
+
+    def test_softfail_result(self):
+        result = verify_authenticity(self.GMAIL_SOFTFAIL)
+        assert result.spf == 'softfail'
+
+    def test_arc_authentication_results_line_is_ignored(self):
+        result = verify_authenticity(self.ARC_ABOVE_REAL)
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+
+    def test_forged_lower_header_does_not_override_topmost(self):
+        result = verify_authenticity(self.FORGED_BELOW_REAL)
+        assert result.spf == 'fail'
+        assert result.dkim == 'fail'
+        assert result.dmarc == 'fail'
+
+    def test_untrusted_authserv_id_is_treated_as_missing(self):
+        result = verify_authenticity(self.UNTRUSTED_AUTHSERV)
+        assert result.spf == 'none'
+        assert result.dkim == 'none'
+        assert result.dmarc == 'none'
+        assert result.alignment is False
+        assert result.details['auth_results_parsed'] is False
+
+    def test_dkim_subdomain_is_aligned(self):
+        result = verify_authenticity(self.DKIM_SUBDOMAIN)
+        assert result.dkim == 'pass'
+        assert result.alignment is True
+
+    def test_unaligned_mailfrom_and_no_dkim_pass(self):
+        result = verify_authenticity(self.SPOOFED_MAILFROM)
+        assert result.spf == 'pass'
+        assert result.alignment is False
+
+    def test_crlf_and_folded_lines_parse_correctly(self):
+        result = verify_authenticity(self.CRLF_FOLDED)
+        assert result.spf == 'pass'
+        assert result.dkim == 'pass'
+        assert result.dmarc == 'pass'
+        assert result.alignment is True
+
+    def test_missing_header_gives_none_without_dns(self):
+        headers = "From: John Doe <john@example.com>\nSubject: Test"
+        result = verify_authenticity(headers)
+        # No trusted header: nothing may be reported as pass (no DNS fallback)
+        assert result.spf == 'none'
+        assert result.dkim == 'none'
+        assert result.dmarc == 'none'
+        assert result.alignment is False
+        assert result.details['auth_results_parsed'] is False
 
     def test_extract_from_domain(self):
         headers = "From: John Doe <john@example.com>\nSubject: Test"
